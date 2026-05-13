@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}CUDA在线评测系统{% endblock %}</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">CUDA在线评测系统</div>
+        <div class="nav-links">
+            {% if user %}
+            <a href="/dashboard">控制台</a>
+            <a href="/submit">提交代码</a>
+            <a href="/queue">队列状态</a>
+            {% if user.is_admin %}
+            <a href="/admin/">管理后台</a>
+            {% endif %}
+            <span class="nav-user">{{ user.username }}</span>
+            <a href="#" onclick="logout()">退出</a>
+            {% endif %}
+        </div>
+    </nav>
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+    <script>
+        async function logout() {
+            await fetch('/api/auth/logout', {method: 'POST'});
+            window.location.href = '/';
+        }
+    </script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}管理后台 — CUDA在线评测系统{% endblock %}
+{% block content %}
+<h1>管理后台</h1>
+
+<div class="admin-nav">
+    <a href="/admin/" class="btn btn-active">总览</a>
+    <a href="/admin/users" class="btn">用户管理</a>
+    <a href="/admin/config" class="btn">系统配置</a>
+</div>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-value">{{ all_users|length }}</div>
+        <div class="stat-label">总用户数</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ jobs|selectattr('status','in',['waiting','compiling','profiling'])|list|length }}</div>
+        <div class="stat-label">进行中任务</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ jobs|selectattr('status','equalto','completed')|list|length }}</div>
+        <div class="stat-label">已完成任务</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ jobs|selectattr('status','equalto','failed')|list|length }}</div>
+        <div class="stat-label">失败任务</div>
+    </div>
+</div>
+
+<div class="section">
+    <h2>最近任务</h2>
+    {% if jobs %}
+    <table class="table">
+        <thead>
+            <tr>
+                <th>任务ID</th>
+                <th>用户ID</th>
+                <th>状态</th>
+                <th>提交时间</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for job in jobs[:30] %}
+            <tr>
+                <td>#{{ job.id }}</td>
+                <td>{{ job.user_id }}</td>
+                <td><span class="status status-{{ job.status }}">{{ status_label(job.status) }}</span></td>
+                <td>{{ job.created_at }}</td>
+                <td>
+                    <a href="/result/{{ job.id }}" class="btn btn-sm">详情</a>
+                    {% if job.status == 'waiting' %}
+                    <button onclick="cancelJob({{ job.id }})" class="btn btn-sm btn-danger">取消</button>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="empty-hint">暂无任务</p>
+    {% endif %}
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function cancelJob(id) {
+    if (!confirm('确定取消任务 #' + id + '？')) return;
+    await fetch('/admin/queue/' + id, {method: 'DELETE'});
+    location.reload();
+}
+</script>
+{% endblock %}
+{% macro status_label(status) -%}
+{% if status == 'waiting' %}等待中
+{% elif status == 'compiling' %}编译中
+{% elif status == 'profiling' %}评测中
+{% elif status == 'completed' %}已完成
+{% else %}失败
+{% endif %}
+{%- endmacro %}

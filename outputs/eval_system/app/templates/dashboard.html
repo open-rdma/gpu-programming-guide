@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}控制台 — CUDA在线评测系统{% endblock %}
+{% block content %}
+<h1>欢迎，{{ user.username }}</h1>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-value">{{ rate_info.remaining }}/{{ rate_info.limit }}</div>
+        <div class="stat-label">剩余提交次数</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ jobs|selectattr('status','equalto','completed')|list|length }}</div>
+        <div class="stat-label">已完成任务</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ jobs|selectattr('status','in',['waiting','compiling','profiling'])|list|length }}</div>
+        <div class="stat-label">进行中任务</div>
+    </div>
+</div>
+
+<div class="section">
+    <h2>我的任务</h2>
+    {% if jobs %}
+    <table class="table">
+        <thead>
+            <tr>
+                <th>任务ID</th>
+                <th>状态</th>
+                <th>提交时间</th>
+                <th>完成时间</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for job in jobs[:20] %}
+            <tr>
+                <td>#{{ job.id }}</td>
+                <td><span class="status status-{{ job.status }}">{{ status_label(job.status) }}</span></td>
+                <td>{{ job.created_at }}</td>
+                <td>{{ job.completed_at or '-' }}</td>
+                <td>
+                    <a href="/result/{{ job.id }}" class="btn btn-sm">详情</a>
+                    {% if job.ncu_report_path %}
+                    <a href="/api/download/{{ job.id }}" class="btn btn-sm">下载报告</a>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="empty-hint">暂无提交记录，<a href="/submit">去提交代码</a></p>
+    {% endif %}
+</div>
+{% endblock %}
+{% macro status_label(status) -%}
+{% if status == 'waiting' %}等待中
+{% elif status == 'compiling' %}编译中
+{% elif status == 'profiling' %}评测中
+{% elif status == 'completed' %}已完成
+{% else %}失败
+{% endif %}
+{%- endmacro %}

@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}登录 — CUDA在线评测系统{% endblock %}
+{% block content %}
+<div class="auth-container">
+    <h1>CUDA在线评测系统</h1>
+    <p class="subtitle">GPU编程课程 — 代码提交与性能评测平台</p>
+
+    <form method="post" action="/api/auth/login" class="auth-form" id="login-form">
+        <input type="hidden" name="use_cookie" value="true">
+        <div class="form-group">
+            <label for="username">用户名</label>
+            <input type="text" id="username" name="username" required autofocus>
+        </div>
+        <div class="form-group">
+            <label for="password">密码</label>
+            <input type="password" id="password" name="password" required>
+        </div>
+        <div id="error-msg" class="error-message" style="display:none"></div>
+        <button type="submit" class="btn btn-primary">登录</button>
+    </form>
+
+    <p class="auth-footer">请使用管理员分配的账号登录。如需注册请联系课程管理员。</p>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+document.getElementById('login-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    const form = new FormData(this);
+    form.set('use_cookie', 'true');
+    try {
+        const resp = await fetch('/api/auth/login', {method: 'POST', body: form});
+        const data = await resp.json();
+        if (resp.ok) {
+            window.location.href = '/dashboard';
+        } else {
+            document.getElementById('error-msg').textContent = data.detail || '登录失败';
+            document.getElementById('error-msg').style.display = 'block';
+        }
+    } catch (err) {
+        document.getElementById('error-msg').textContent = '网络错误';
+        document.getElementById('error-msg').style.display = 'block';
+    }
+});
+</script>
+{% endblock %}

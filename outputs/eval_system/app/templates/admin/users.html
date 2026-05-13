@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}用户管理 — CUDA在线评测系统{% endblock %}
+{% block content %}
+<h1>用户管理</h1>
+
+<div class="admin-nav">
+    <a href="/admin/" class="btn">总览</a>
+    <a href="/admin/users" class="btn btn-active">用户管理</a>
+    <a href="/admin/config" class="btn">系统配置</a>
+</div>
+
+<div class="section">
+    <h2>创建用户</h2>
+    <form method="post" action="/admin/users/create" class="inline-form" id="create-user-form">
+        <input type="text" name="username" placeholder="用户名" required>
+        <input type="password" name="password" placeholder="密码" required>
+        <select name="rate_limit">
+            <option value="5">5次/小时</option>
+            <option value="10">10次/小时</option>
+            <option value="20">20次/小时</option>
+            <option value="50">50次/小时</option>
+        </select>
+        <label><input type="checkbox" name="is_admin" value="true"> 管理员</label>
+        <button type="submit" class="btn btn-primary">创建</button>
+    </form>
+    <div id="create-result"></div>
+</div>
+
+<div class="section">
+    <h2>用户列表</h2>
+    <table class="table">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>用户名</th>
+                <th>API Key</th>
+                <th>角色</th>
+                <th>状态</th>
+                <th>速率限制</th>
+                <th>创建时间</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for u in all_users %}
+            <tr>
+                <td>{{ u.id }}</td>
+                <td>{{ u.username }}</td>
+                <td><code class="key-preview">{{ u.api_key[:16] }}...</code></td>
+                <td>{{ '管理员' if u.is_admin else '用户' }}</td>
+                <td>{{ '启用' if u.is_active else '禁用' }}</td>
+                <td>{{ u.rate_limit }}/h</td>
+                <td>{{ u.created_at }}</td>
+                <td>
+                    <button onclick="toggleUser({{ u.id }})" class="btn btn-sm">
+                        {{ '禁用' if u.is_active else '启用' }}
+                    </button>
+                    <button onclick="updateRateLimit({{ u.id }})" class="btn btn-sm">修改限制</button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+document.getElementById('create-user-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    const form = new FormData(this);
+    const resp = await fetch('/admin/users/create', {method: 'POST', body: form});
+    const data = await resp.json();
+    if (resp.ok) {
+        document.getElementById('create-result').innerHTML =
+            '<div class="success-message">用户 ' + data.user.username + ' 创建成功！API Key: <code>' + data.user.api_key + '</code></div>';
+        setTimeout(() => location.reload(), 2000);
+    } else {
+        document.getElementById('create-result').innerHTML =
+            '<div class="error-message">' + data.detail + '</div>';
+    }
+});
+
+async function toggleUser(id) {
+    await fetch('/admin/users/' + id + '/toggle', {method: 'POST'});
+    location.reload();
+}
+
+async function updateRateLimit(id) {
+    const limit = prompt('请输入新的速率限制（次/小时）：');
+    if (!limit) return;
+    const form = new FormData();
+    form.set('rate_limit', parseInt(limit));
+    await fetch('/admin/users/' + id + '/rate-limit', {method: 'POST', body: form});
+    location.reload();
+}
+</script>
+{% endblock %}

@@ -1,0 +1,6 @@
+[submodule "hello-agents"]
+	path = cold-start/hello-agents
+	url = https://github.com/datawhalechina/hello-agents.git
+[submodule "SGEMM_CUDA"]
+	path = cold-start/SGEMM_CUDA
+	url = https://github.com/siboehm/SGEMM_CUDA.git

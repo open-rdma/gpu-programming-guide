@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sed -i 's|https://github.com/datawhalechina/Hello-Agents/discussions|https://github.com/your-org/your-project/discussions|g' datawhale-course-style.md)",
+      "Bash(sed -i 's|https://github.com/datawhalechina/Hello-Agents|https://github.com/your-org/your-project|g' datawhale-course-style.md)",
+      "Bash(sed -i 's|\\\\[Hello-Agents\\\\]\\(https://github.com/datawhalechina/Hello-Agents\\) -- DataWhale community course on AI Agent construction|[Hello-Agents] -- open-source community course on AI Agent construction|g' datawhale-course-style.md)",
+      "Bash(sed -i 's|- DataWhale community writing conventions|- Open-source community writing conventions|g' datawhale-course-style.md)",
+      "Bash(sed -i 's|├── datawhale.png|├── project-logo.png|g' datawhale-course-style.md)",
+      "Bash(sed -i 's|src=\"https://raw.githubusercontent.com/datawhalechina/Hello-Agents/main/docs/images/4-figures/4-1.png\"|src=\"https://raw.githubusercontent.com/your-org/your-project/main/docs/images/4-figures/4-1.png\"|g' datawhale-course-style.md)",
+      "Bash(sed -i 's|├── Extra04-DatawhaleFAQ.md|├── Extra04-CommunityFAQ.md|g' datawhale-course-style.md)",
+      "Bash(sed -i 's|DataWhale community course|open-source community course|g' datawhale-course-style.md)",
+      "Bash(grep -v \"^total\\\\|^d.* \\\\.\\\\.$\\\\|^d.* \\\\.$\\\\|\\\\.git$\")",
+      "Bash(git mv *)",
+      "Bash(cat .gitmodules)",
+      "Bash(cat cold-start/.gitmodules)",
+      "Bash(mv hello-agents *)",
+      "Bash(mv SGEMM_CUDA cold-start/)",
+      "Bash(sed -i 's|path = hello-agents|path = cold-start/hello-agents|' cold-start/.gitmodules)",
+      "Bash(sed -i 's|path = SGEMM_CUDA|path = cold-start/SGEMM_CUDA|' cold-start/.gitmodules)",
+      "Bash(git submodule *)",
+      "Bash(git add *)",
+      "Bash(xargs grep *)"
+    ]
+  }
+}

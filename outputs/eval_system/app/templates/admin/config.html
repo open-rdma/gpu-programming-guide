@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}系统配置 — CUDA在线评测系统{% endblock %}
+{% block content %}
+<h1>系统配置</h1>
+
+<div class="admin-nav">
+    <a href="/admin/" class="btn">总览</a>
+    <a href="/admin/users" class="btn">用户管理</a>
+    <a href="/admin/config" class="btn btn-active">系统配置</a>
+</div>
+
+<div class="section">
+    <table class="table">
+        <thead>
+            <tr>
+                <th>配置项</th>
+                <th>当前值</th>
+                <th>说明</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for cfg in configs %}
+            <tr>
+                <td><code>{{ cfg.key }}</code></td>
+                <td>{{ cfg.value }}</td>
+                <td>{{ config_desc(cfg.key) }}</td>
+                <td>
+                    <button onclick="editConfig('{{ cfg.key }}', '{{ cfg.value }}')" class="btn btn-sm">修改</button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function editConfig(key, currentValue) {
+    const value = prompt('修改 ' + key + '：', currentValue);
+    if (!value) return;
+    const form = new FormData();
+    form.set('key', key);
+    form.set('value', value);
+    const resp = await fetch('/admin/config', {method: 'POST', body: form});
+    if (resp.ok) location.reload();
+}
+</script>
+{% endblock %}
+{% macro config_desc(key) -%}
+{% if key == 'default_rate_limit' %}每用户每小时默认提交次数限制
+{% elif key == 'compile_timeout' %}nvcc编译超时时间（秒）
+{% elif key == 'profile_timeout' %}ncu评测超时时间（秒）
+{% elif key == 'max_code_size' %}代码最大长度（字节）
+{% else %}-
+{% endif %}
+{%- endmacro %}

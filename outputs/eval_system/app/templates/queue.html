@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}队列状态 — CUDA在线评测系统{% endblock %}
+{% block content %}
+<h1>队列状态</h1>
+
+<div class="section">
+    <h2>我的最近任务</h2>
+    {% if jobs %}
+    <table class="table">
+        <thead>
+            <tr>
+                <th>任务ID</th>
+                <th>状态</th>
+                <th>队列位置</th>
+                <th>提交时间</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for job in jobs[:30] %}
+            <tr>
+                <td>#{{ job.id }}</td>
+                <td><span class="status status-{{ job.status }}">{{ status_label(job.status) }}</span></td>
+                <td>
+                    {% if job.status == 'waiting' %}
+                    第 {{ job.queue_position }} 位
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+                <td>{{ job.created_at }}</td>
+                <td>
+                    <a href="/result/{{ job.id }}" class="btn btn-sm">详情</a>
+                    {% if job.ncu_report_path %}
+                    <a href="/api/download/{{ job.id }}" class="btn btn-sm">下载报告</a>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="empty-hint">暂无提交记录</p>
+    {% endif %}
+</div>
+
+<div class="section">
+    <h2>状态说明</h2>
+    <ul>
+        <li><span class="status status-waiting">等待中</span> — 任务在队列中等待处理</li>
+        <li><span class="status status-compiling">编译中</span> — 正在使用nvcc编译代码</li>
+        <li><span class="status status-profiling">评测中</span> — 正在使用NCU进行性能分析</li>
+        <li><span class="status status-completed">已完成</span> — 评测完成，可下载NCU报告</li>
+        <li><span class="status status-failed">失败</span> — 编译或评测失败，可查看错误信息</li>
+    </ul>
+</div>
+{% endblock %}
+{% macro status_label(status) -%}
+{% if status == 'waiting' %}等待中
+{% elif status == 'compiling' %}编译中
+{% elif status == 'profiling' %}评测中
+{% elif status == 'completed' %}已完成
+{% else %}失败
+{% endif %}
+{%- endmacro %}

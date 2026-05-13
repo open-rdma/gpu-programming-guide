@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}任务 #{{ job.id }} — CUDA在线评测系统{% endblock %}
+{% block content %}
+<h1>任务 #{{ job.id }}</h1>
+
+<div class="job-detail">
+    <div class="job-meta">
+        <div><strong>状态：</strong><span class="status status-{{ job.status }}">{{ status_label(job.status) }}</span></div>
+        <div><strong>提交时间：</strong>{{ job.created_at }}</div>
+        <div><strong>完成时间：</strong>{{ job.completed_at or '-' }}</div>
+    </div>
+
+    {% if job.error_message %}
+    <div class="section error-box">
+        <h2>错误信息</h2>
+        <pre>{{ job.error_message }}</pre>
+    </div>
+    {% endif %}
+
+    {% if job.compile_output %}
+    <div class="section">
+        <h2>编译输出</h2>
+        <pre>{{ job.compile_output }}</pre>
+    </div>
+    {% endif %}
+
+    {% if job.profile_summary %}
+    <div class="section">
+        <h2>性能评测摘要</h2>
+        <pre>{{ job.profile_summary }}</pre>
+    </div>
+    {% endif %}
+
+    <div class="section">
+        <h2>提交的代码</h2>
+        <pre class="code-block">{{ job.source_code }}</pre>
+    </div>
+
+    <div class="section actions">
+        {% if job.ncu_report_path %}
+        <a href="/api/download/{{ job.id }}" class="btn btn-primary">下载NCU报告 (.ncu-rep)</a>
+        <p class="hint">下载后可使用 NVIDIA Nsight Compute 打开该 .ncu-rep 文件查看详细的性能分析结果和可视化界面。</p>
+        {% elif job.status in ('waiting', 'compiling', 'profiling') %}
+        <p>评测尚未完成，请稍后刷新查看结果。</p>
+        <button onclick="location.reload()" class="btn">刷新</button>
+        {% endif %}
+        <a href="/dashboard" class="btn">返回控制台</a>
+    </div>
+</div>
+{% endblock %}
+{% macro status_label(status) -%}
+{% if status == 'waiting' %}等待中
+{% elif status == 'compiling' %}编译中
+{% elif status == 'profiling' %}评测中
+{% elif status == 'completed' %}已完成
+{% else %}失败
+{% endif %}
+{%- endmacro %}
