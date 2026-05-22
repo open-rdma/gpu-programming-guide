@@ -14,7 +14,7 @@
 
 | 链接方式 | Linux 库文件 | Windows 库文件 | 特点 |
 | :--- | :--- | :--- | :--- |
-| <strong>静态链接</strong> | `libcudart.a` | `cudart.lib` | 运行时代码嵌入可执行文件，无需附带 DLL |
+| <strong>静态链接</strong> | `libcudart_static.a` | `cudart_static.lib` | 运行时代码嵌入可执行文件，无需附带 DLL |
 | <strong>动态链接</strong> | `libcudart.so` | `cudart.dll` | 可执行文件更小，运行时需要 DLL/SO 可用 |
 
 </div>
