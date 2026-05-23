@@ -545,6 +545,8 @@ no kernel image is available for execution on the device
 ```bash
 # 1. 确保 arch/code 覆盖目标 GPU 的计算能力
 nvcc file.cu -o file -arch=sm_70  # 如果目标是 V100
+# CMake环境下设置目标架构
+set(CMAKE_CUDA_ARCHITECTURES "70;75;80;86;89;90")
 
 # 2. 使用 Fat Binary 覆盖多个架构 + PTX 后备
 nvcc file.cu -o file \
@@ -628,16 +630,16 @@ nvcc file.cu -keep -arch=sm_80
 # 2. 增加编译器信息输出
 nvcc file.cu --verbose -arch=sm_80
 
-# 3. 仅做语法检查，不生成代码
+# 3. 打印所有将要执行的编译命令，但不实际执行任何编译操作
 nvcc file.cu -arch=sm_80 --dryrun
 
 # 4. 仅编译设备代码（检查设备代码语法）
 nvcc file.cu -ptx -arch=compute_80
 ```
 
-## 4.8 C++ 兼容性与 64 位支持
+## 4.7 C++ 兼容性与 64 位支持
 
-### 4.8.1 C++ 兼容性
+### 4.7.1 C++ 兼容性
 
 NVCC 编译器的前端按照 C++ 语法规则处理 CUDA 源文件。但主机代码和设备代码的 C++ 支持程度不同：
 
@@ -646,12 +648,12 @@ NVCC 编译器的前端按照 C++ 语法规则处理 CUDA 源文件。但主机�
 - NVCC 支持通过 `-std=c++11`、`-std=c++14`、`-std=c++17` 等选项指定 C++ 标准版本。
 
 <strong>设备代码（Device Code）</strong>：
-- 仅<strong>完整支持 C++ 的一个子集</strong>。GPU 设备没有完整的 C++ 运行时库，因此很多 C++ 特性在设备代码中不可用或受限。
+- <strong>设备代码支持 C++14 完整特性，以及 C++17 和 C++20 的部分特性</strong>。GPU 设备没有完整的 C++ 运行时库，因此很多 C++ 特性在设备代码中不可用或受限。
 - <strong>不支持的特性包括</strong>：
   - C++ 标准库（`std::vector`、`std::string`、`std::map` 等）——GPU 设备上没有对应的运行时实现。
   - 异常处理（`try`/`catch`/`throw`）——GPU 硬件不能支持 C++ 异常。
   - 运行时类型识别（RTTI, `typeid`、`dynamic_cast`）——设备代码中不支持。
-  - `new`/`delete` 操作符（某些架构的特定版本除外）。
+  - `new`/`delete` 操作符。
   - 虚函数的多态调用（从 CC 3.5 开始有限支持）。
 - <strong>支持的特性包括</strong>：
   - 模板（Templates）
@@ -661,11 +663,11 @@ NVCC 编译器的前端按照 C++ 语法规则处理 CUDA 源文件。但主机�
   - 函数重载
   - 类和结构体
   - 静态成员变量（从 CC 2.0+）
-  - `constexpr`
+  - `constexpr`（CUDA 12.0+）
 
 设备代码支持的 C++ 子集的完整列表在 CUDA Programming Guide 的"C++ Language Support"章节中详细描述。
 
-### 4.8.2 64 位兼容性
+### 4.7.2 64 位兼容性
 
 NVCC 对 64 位和 32 位编译模式有明确的规则：
 
@@ -678,7 +680,7 @@ NVCC 对 64 位和 32 位编译模式有明确的规则：
 
 > <strong>提示</strong>：在现代 CUDA 开发中（CUDA 10.0 及以后），NVIDIA 已不再提供 32 位版本的 CUDA Toolkit。所有开发都应在 64 位模式下进行。除非你在维护非常老旧的遗留系统，否则不需要关心 32 位模式。
 
-### 4.8.3 独立编译与分离编译
+### 4.7.3 独立编译与分离编译
 
 CUDA 程序可以在多个 `.cu` 文件中组织代码，这涉及到<strong>独立编译（Separate Compilation）</strong>：
 
@@ -761,7 +763,7 @@ nvcc file.cu -o file --target-os-variant=Linux --target-arch=arm64 \
     --cross-compile --compiler-bindir=/usr/bin/aarch64-linux-gnu-g++
 ```
 
-### 4.8.5 NVCC 优化级别与控制选项
+### 4.7.5 NVCC 优化级别与控制选项
 
 NVCC 提供多级优化控制，从完全不优化到激进优化：
 
@@ -812,7 +814,7 @@ ptxas info    : Used 32 registers, 4096 bytes smem, 352 bytes cmem[0]
 关键指标解读：
 - <strong>registers</strong>：每个线程使用的寄存器数。越少越好（允许更多 warp 驻留），但太少会导致溢出（spill）。
 - <strong>smem</strong>：静态 + 动态共享内存每块使用量（字节）。
-- <strong>spill stores/loads</strong>：寄存器溢出到局部内存的次数。0 是最理想的——所有变量都装在寄存器中。
+- <strong>spill stores/loads</strong>：寄存器溢出到局部内存的次数。0 是最理想的——所有变量都装在寄存器中。非零值通常会导致性能显著下降（局部内存访问延迟是寄存器的数百倍），是内核优化的核心指标之一。
 - <strong>cmem[0]</strong>：常量内存使用量（字节）。用于存储内核参数等。
 
 <strong>NVCC 编译阶段及对应工具链</strong>：
@@ -829,7 +831,7 @@ ptxas info    : Used 32 registers, 4096 bytes smem, 352 bytes cmem[0]
 
 了解这个工具链能帮助你更好地理解 NVCC 的输出和错误信息。例如，`ptxas` 的错误表明 PTX 汇编阶段出了问题（通常是代码使用了当前架构不支持的指令）；`cicc` 的错误表明 CUDA C++ 前端解析出了问题。
 
-### 4.8.5 编译时间优化技巧
+### 4.7.5 编译时间优化技巧
 
 大型 CUDA 项目（特别是使用大量模板或自动生成代码的）可能遇到较长的编译时间。以下是一些优化技巧：
 
@@ -874,11 +876,11 @@ nvcc file.cu -o file -gencode ... -gencode ... -gencode ...
 
 CUDA 编译器需要为每个 `-gencode` 选项重新编译设备代码。将大型设备函数放在 `.cuh` 头文件中会导致它们在每个翻译单元中被重复编译。尽可能将设备代码放在 `.cu` 文件中，只将简洁的接口声明放在头文件中。
 
-## 4.9 构建系统集成与实战
+## 4.8 构建系统集成与实战
 
 在真实项目中，CUDA 代码很少单独使用 `nvcc` 命令行编译，而是集成在构建系统中。本节介绍如何将 CUDA 编译集成到 CMake 和 Makefile 中。
 
-### 4.9.1 CMake 项目配置
+### 4.8.1 CMake 项目配置
 
 CMake 3.8+ 提供了对 CUDA 作为一等语言（first-class language）的支持：
 
@@ -944,7 +946,7 @@ target_compile_options(vector_add PRIVATE
 )
 ```
 
-### 4.9.2 Makefile 示例
+### 4.8.2 Makefile 示例
 
 ```makefile
 # Makefile for CUDA project
@@ -977,7 +979,7 @@ clean:
 	rm -f vector_add device_query *.o *.ptx *.cubin
 ```
 
-### 4.9.3 CUDA 相关环境变量
+### 4.8.3 CUDA 相关环境变量
 
 CUDA Toolkit 在运行时受多种环境变量的影响。以下是开发中常用的：
 
@@ -988,7 +990,6 @@ CUDA Toolkit 在运行时受多种环境变量的影响。以下是开发中常�
 | `CUDA_CACHE_DISABLE` | 设为 1 禁用 JIT 缓存 | `CUDA_CACHE_DISABLE=1` |
 | `CUDA_CACHE_PATH` | JIT 缓存目录 | `CUDA_CACHE_PATH=/tmp/cuda_cache` |
 | `CUDA_DEVICE_MAX_CONNECTIONS` | 每个设备的 CUDA 流多路复用能力 | 默认 8 |
-| `CUDA_ERROR_CHECKING` | 控制运行时错误检查粒度 | 默认中等 |
 | `CUDA_MANAGED_FORCE_DEVICE_ALLOC` | 强制统一内存分配在设备端 | |
 
 <strong>在开发中常用环境变量组合</strong>：
@@ -1004,7 +1005,7 @@ CUDA_VISIBLE_DEVICES=1 ./my_app
 CUDA_CACHE_DISABLE=1 ./my_app
 ```
 
-### 4.9.4 多架构部署策略小结
+### 4.8.4 多架构部署策略小结
 
 根据你的目标用户群体，推荐以下几种 Fat Binary 策略：
 
@@ -1078,11 +1079,11 @@ Driver API 的优势是精确控制——你可以：
 
 > <strong>提示</strong>：Runtime API 在内部就是通过 Driver API 实现的。使用 Runtime API 时，NVCC 自动生成的代码本质上就是在执行类似上面 `cuModuleLoad` → `cuModuleGetFunction` → `cuLaunchKernel` 的操作。
 
-## 4.10 动手体验：编译和观察 Fat Binary
+## 4.9 动手体验：编译和观察 Fat Binary
 
 在本节中，我们将通过多个实际动手实验来直观感受 NVCC 编译模型的每个方面。
 
-### 4.10.1 实验环境准备
+### 4.9.1 实验环境准备
 
 首先，准备一个完整的 CUDA 程序 `device_query.cu`。这个程序将：
 1. 查询并打印当前 GPU 的计算能力和属性。
@@ -1091,7 +1092,7 @@ Driver API 的优势是精确控制——你可以：
 
 本节所用的完整可编译代码参见 `code/chapter4/device_query.cu`。
 
-### 4.10.2 实验一：单架构编译
+### 4.9.2 实验一：单架构编译
 
 <strong>实验一：针对特定架构编译</strong>
 
@@ -1117,7 +1118,7 @@ nvcc device_query.cu -o device_query_sm80 -arch=sm_80
 cuobjdump device_query_sm80 | head -20
 ```
 
-### 4.10.3 实验二：Fat Binary 编译与检查
+### 4.9.3 实验二：Fat Binary 编译与检查
 
 <strong>实验二：生成 Fat Binary</strong>
 
@@ -1144,8 +1145,8 @@ CUDA Toolkit 提供了 `cuobjdump` 工具来检查 cubin 和 Fat Binary 文件�
 cuobjdump device_query_fat
 
 # 列出所有的 cubin 和 PTX 嵌入
-cuobjdump -list-ptx device_query_fat
-cuobjdump -list-sass device_query_fat
+cuobjdump --list-ptx device_query_fat
+cuobjdump --list-sass device_query_fat
 ```
 
 典型输出示例：
@@ -1178,7 +1179,7 @@ compile_size = 64bit
 cuobjdump -sass device_query_fat
 ```
 
-### 4.10.4 实验三：PTX 与 cubin 分步生成
+### 4.9.4 实验三：PTX 与 cubin 分步生成
 
 <strong>实验四：PTX 代码的分步生成</strong>
 
@@ -1235,7 +1236,7 @@ nvcc device_query.ptx -cubin -o device_query.cubin -arch=sm_80
 cuobjdump -sass device_query.cubin
 ```
 
-### 4.10.5 实验四：保留所有中间文件
+### 4.9.5 实验四：保留所有中间文件
 
 ```bash
 # 使用 -keep 选项保留所有编译中间文件
@@ -1249,7 +1250,7 @@ ls -la device_query*
 # ... (可能还有更多)
 ```
 
-### 4.10.6 实验五：编译器选项演练
+### 4.9.6 实验五：编译器选项演练
 
 以下是本实验中用到的所有相关 NVCC 选项的总结：
 
@@ -1276,7 +1277,7 @@ ls -la device_query*
 
 </div>
 
-## 4.11 本章小结
+## 4.10 本章小结
 
 在本章中，我们深入探索了 CUDA 程序的编译世界。我们的旅程从 NVCC 编译器驱动程序的角色开始，一直延伸到如何构建跨多代 GPU 架构都兼容的 Fat Binary：
 
