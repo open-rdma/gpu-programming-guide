@@ -14,8 +14,8 @@
 
 | 链接方式 | Linux 库文件 | Windows 库文件 | 特点 |
 | :--- | :--- | :--- | :--- |
-| <strong>静态链接</strong> | `libcudart.a` | `cudart.lib` | 运行时代码嵌入可执行文件，无需附带 DLL |
-| <strong>动态链接</strong> | `libcudart.so` | `cudart.dll` | 可执行文件更小，运行时需要 DLL/SO 可用 |
+| <strong>静态链接</strong> | `libcudart_static.a` | `cudart_static.lib` | 运行时代码嵌入可执行文件，无需附带 DLL |
+| <strong>动态链接</strong> | `libcudart.so` | `cudart.lib（导入库） + cudart.dll（运行时）` | 可执行文件更小，运行时需要 DLL/SO 可用 |
 
 </div>
 
@@ -32,7 +32,9 @@ nvcc program.cu -o program -lcudart
 
 # 对于 CMake 项目
 find_package(CUDAToolkit REQUIRED)
-target_link_libraries(my_target CUDA::cudart)
+target_link_libraries(my_target PRIVATE CUDA::cudart)
+# 如果需要静态链接，只需替换目标名
+# target_link_libraries(my_cuda_app PRIVATE CUDA::cudart_static)
 ```
 
 ### 5.1.2 API 命名约定
@@ -252,7 +254,7 @@ cudaError_t cudaMemcpy(void *dst, const void *src,
 
 <strong>UVA 下的自动方向推断</strong>：
 
-如果设备支持<strong>统一虚拟地址空间（UVA, Unified Virtual Address Space）</strong>（CC 2.0+），可以使用 `cudaMemcpyDefault` 作为 `kind` 参数：
+如果设备支持<strong>统一虚拟地址空间（UVA, Unified Virtual Address Space）</strong>（64位 Linux/Windows + CC 2.0+），可以使用 `cudaMemcpyDefault` 作为 `kind` 参数：
 
 ```cuda
 cudaMemcpy(dst, src, count, cudaMemcpyDefault);
@@ -512,6 +514,8 @@ cudaExtent extent = make_cudaExtent(
 
 - <strong>pitch（行步长）</strong>：从一行开头到下一行开头的字节数。
 - <strong>slicePitch（层步长）</strong>：从一层开头到下一层开头的字节数。计算公式：`slicePitch = pitch * height`。
+
+<strong>说明</strong>：cudaMalloc3D 会自动计算并返回正确的 pitch 和 slicePitch，不要手动计算这些值，始终使用返回的 cudaPitchedPtr 结构体中的字段进行地址计算。
 
 <strong>完整的三维分配和遍历示例</strong>：
 
@@ -786,6 +790,7 @@ printf("GPU operation took: %.3f ms\n", milliseconds);
 cudaEventDestroy(start);
 cudaEventDestroy(stop);
 ```
+💡 思考：如果仅需要使用事件实现流间同步，而不需要计时功能，可以在创建事件时使用 cudaEventDisableTiming 标志。为什么这样做能显著提升性能？
 
 ### 5.8.2 事件的几个重要特性
 
