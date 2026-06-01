@@ -1,16 +1,13 @@
 /**
- * Chapter 10 - Experiment 10-3: Occupancy Tuning
- *
- * Demonstrates how register usage, shared memory usage, and block size
- * affect occupancy and performance.
- *
- * Compile: nvcc -arch=sm_86 -O3 occupancy_tuning.cu -o occupancy_tuning
+ * Chapter 10 - Experiment 10-3: Occupancy Tuning Experiment
+ * 
+ * Measures the impact of register and shared memory usage on kernel occupancy and performance.
+ * Compile: nvcc -arch=sm_80 -O3 occupancy_tuning.cu -o occupancy_tuning
  * Run: ./occupancy_tuning
  */
 
 #include <stdio.h>
 #include <cuda_runtime.h>
-#include <cmath>
 
 #define CHECK_CUDA(call) {                                            \
     cudaError_t err = call;                                           \
@@ -21,120 +18,69 @@
     }                                                                 \
 }
 
-// Kernel with configurable register pressure
-// By using many temporary variables, we force the compiler to use more registers
-template<int NUM_TEMPS>
-__global__ void registerPressure(float * __restrict__ a,
-                                  float * __restrict__ b,
-                                  float * __restrict__ c, int n) {
-    int idx = threadIdx.x + blockIdx.x * blockDim.x;
-    if (idx < n) {
-        float v0 = a[idx];
-        float v1 = b[idx];
-        float v2 = v0 * v1;
-        float v3 = v2 + v0;
-        float v4 = v3 * v1;
-        float v5 = v4 - v0;
-        float v6 = v5 * v2;
-        float v7 = v6 + v3;
-        float v8 = v7 * v4;
-
-        // Use all temps to prevent compiler optimization
-        if (NUM_TEMPS >= 1) c[idx] = v0;
-        if (NUM_TEMPS >= 2) c[idx] += v1;
-        if (NUM_TEMPS >= 3) c[idx] += v2;
-        if (NUM_TEMPS >= 4) c[idx] += v3;
-        if (NUM_TEMPS >= 5) c[idx] += v4;
-        if (NUM_TEMPS >= 6) c[idx] += v5;
-        if (NUM_TEMPS >= 7) c[idx] += v6;
-        if (NUM_TEMPS >= 8) c[idx] += v7;
-        if (NUM_TEMPS >= 9) c[idx] += v8;
+// 模板特化：处理SHMEM_BYTES=0的情况（不声明共享内存）
+template<int REGISTERS_PER_THREAD, int SHMEM_BYTES>
+__global__ void sharedMemPressure(float* a, float* b, float* c, int N) {
+    // 消耗指定数量的寄存器
+    float regs[REGISTERS_PER_THREAD];
+    
+    // 初始化寄存器（防止编译器优化）
+    #pragma unroll
+    for (int i = 0; i < REGISTERS_PER_THREAD; i++) {
+        regs[i] = (float)i;
     }
-}
-
-// Explicit instantiation
-template __global__ void registerPressure<1>(float*, float*, float*, int);
-template __global__ void registerPressure<3>(float*, float*, float*, int);
-template __global__ void registerPressure<6>(float*, float*, float*, int);
-template __global__ void registerPressure<9>(float*, float*, float*, int);
-
-// Kernel with configurable shared memory usage
-template<int SHMEM_BYTES>
-__global__ void sharedMemPressure(float * __restrict__ a,
-                                   float * __restrict__ b,
-                                   float * __restrict__ c, int n) {
+    
+    // 只有当SHMEM_BYTES>0时才声明和使用共享内存
+    #if SHMEM_BYTES > 0
     __shared__ float smem[SHMEM_BYTES / sizeof(float)];
-    int idx = threadIdx.x + blockIdx.x * blockDim.x;
     int tid = threadIdx.x;
-
-    // Initialize shared memory
-    if (tid < SHMEM_BYTES / (int)sizeof(float)) {
-        smem[tid] = (float)tid;
+    
+    // 使用共享内存（防止编译器优化）
+    if (tid < SHMEM_BYTES / sizeof(float)) {
+        smem[tid] = regs[0];
     }
     __syncthreads();
-
-    if (idx < n) {
-        float sum = a[idx] + b[idx];
-        // Use shared memory data
-        for (int i = 0; i < SHMEM_BYTES / (int)sizeof(float) && i < 256; i++) {
-            sum += smem[i] * 0.001f;
+    #endif
+    
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < N) {
+        // 执行一些计算来消耗寄存器
+        float sum = 0.0f;
+        #pragma unroll
+        for (int i = 0; i < REGISTERS_PER_THREAD; i++) {
+            sum += regs[i] * a[idx] + b[idx];
         }
         c[idx] = sum;
     }
 }
 
-template __global__ void sharedMemPressure<0>(float*, float*, float*, int);
-template __global__ void sharedMemPressure<1024>(float*, float*, float*, int);
-template __global__ void sharedMemPressure<4096>(float*, float*, float*, int);
-template __global__ void sharedMemPressure<8192>(float*, float*, float*, int);
-template __global__ void sharedMemPressure<16384>(float*, float*, float*, int);
-
-// Helper to calculate occupancy
-float calculateOccupancy(int blockSize, int dynamicSmem,
-                         void* kernel, const char* name) {
-    int numBlocks;
-    CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &numBlocks, kernel, blockSize, dynamicSmem));
-
-    cudaDeviceProp prop;
-    int device;
-    CHECK_CUDA(cudaGetDevice(&device));
-    CHECK_CUDA(cudaGetDeviceProperties(&prop, device));
-
-    int activeWarps = numBlocks * blockSize / prop.warpSize;
-    int maxWarps = prop.maxThreadsPerMultiProcessor / prop.warpSize;
-    float occupancy = (float)activeWarps / maxWarps * 100.0f;
-
-    printf("%-30s BlockSize=%4d, Smem=%5d: %2d blocks/SM, %3d warps/SM, Occupancy=%.1f%%\n",
-           name, blockSize, dynamicSmem, numBlocks, activeWarps, occupancy);
-
-    return occupancy;
-}
-
-// Simple benchmark function
-float benchmarkKernelFloat(void (*kernel)(float*, float*, float*, int),
-                           float *d_a, float *d_b, float *d_c, int n,
-                           int gridSize, int blockSize, int iterations) {
+// 测量内核执行时间
+float measureKernel(void (*kernel)(float*, float*, float*, int), 
+                   float* d_a, float* d_b, float* d_c, int N,
+                   int blockSize, int iterations) {
     cudaEvent_t start, stop;
     CHECK_CUDA(cudaEventCreate(&start));
     CHECK_CUDA(cudaEventCreate(&stop));
-
-    kernel<<<gridSize, blockSize>>>(d_a, d_b, d_c, n);
+    
+    int gridSize = (N + blockSize - 1) / blockSize;
+    
+    // 预热
+    kernel<<<gridSize, blockSize>>>(d_a, d_b, d_c, N);
     CHECK_CUDA(cudaDeviceSynchronize());
-
+    
     CHECK_CUDA(cudaEventRecord(start, 0));
     for (int i = 0; i < iterations; i++) {
-        kernel<<<gridSize, blockSize>>>(d_a, d_b, d_c, n);
+        kernel<<<gridSize, blockSize>>>(d_a, d_b, d_c, N);
     }
     CHECK_CUDA(cudaEventRecord(stop, 0));
     CHECK_CUDA(cudaEventSynchronize(stop));
-
+    
     float ms;
     CHECK_CUDA(cudaEventElapsedTime(&ms, start, stop));
-
+    
     CHECK_CUDA(cudaEventDestroy(start));
     CHECK_CUDA(cudaEventDestroy(stop));
-
+    
     return ms / iterations;
 }
 
@@ -143,101 +89,95 @@ int main() {
     int device;
     CHECK_CUDA(cudaGetDevice(&device));
     CHECK_CUDA(cudaGetDeviceProperties(&prop, device));
-
-    printf("=== Occupancy Tuning Experiment ===\n");
+    
+    printf("=== CUDA Occupancy Tuning Experiment ===\n");
     printf("GPU: %s (SM %d.%d)\n", prop.name, prop.major, prop.minor);
     printf("Max threads per SM: %d\n", prop.maxThreadsPerMultiProcessor);
-    printf("Max warps per SM: %d\n", prop.maxThreadsPerMultiProcessor / prop.warpSize);
+    printf("Max warps per SM: %d\n", prop.maxThreadsPerMultiProcessor / 32);
     printf("Registers per SM: %d\n", prop.regsPerMultiprocessor);
-    printf("Shared memory per SM: %d KB\n", prop.sharedMemPerMultiprocessor / 1024);
-    printf("Max block size: %d\n", prop.maxThreadsPerBlock);
-    printf("Max blocks per SM: %d\n\n", prop.maxBlocksPerMultiProcessor);
-
-    const int N = 16 * 1024 * 1024;  // 16M elements
-    const int iterations = 50;
-    const size_t bytes = N * sizeof(float);
-
+    printf("Shared memory per SM: %d KB\n\n", prop.sharedMemPerMultiprocessor / 1024);
+    
+    const int N = 1 << 22; // 400万个元素
+    const int blockSize = 256;
+    const int iterations = 10;
+    
+    float *h_a, *h_b, *h_c;
     float *d_a, *d_b, *d_c;
-    CHECK_CUDA(cudaMalloc(&d_a, bytes));
-    CHECK_CUDA(cudaMalloc(&d_b, bytes));
-    CHECK_CUDA(cudaMalloc(&d_c, bytes));
-
-    // ===== Part 1: Effect of block size on occupancy =====
-    printf("--- Part 1: Block Size vs Occupancy ---\n");
-    printf("(Kernel: registerPressure<3> - moderate register usage)\n\n");
-
-    int blockSizes[] = {32, 64, 128, 256, 512, 1024};
-    for (int i = 0; i < 6; i++) {
-        int bs = blockSizes[i];
-        calculateOccupancy(bs, 0, (void*)registerPressure<3>, "regPressure<3>");
-        int gs = (N + bs - 1) / bs;
-        float ms = benchmarkKernelFloat(registerPressure<3>, d_a, d_b, d_c, N, gs, bs, iterations);
-        printf("   -> Time: %.4f ms\n\n", ms);
+    
+    // 分配主机内存
+    h_a = (float*)malloc(N * sizeof(float));
+    h_b = (float*)malloc(N * sizeof(float));
+    h_c = (float*)malloc(N * sizeof(float));
+    
+    // 初始化数据
+    for (int i = 0; i < N; i++) {
+        h_a[i] = 1.0f;
+        h_b[i] = 2.0f;
     }
-
-    // ===== Part 2: Effect of register usage on occupancy =====
-    printf("--- Part 2: Register Usage vs Occupancy ---\n");
-    printf("(Block size fixed at 256)\n\n");
-
-    calculateOccupancy(256, 0, (void*)registerPressure<1>, "regPressure<1> (few regs)");
-    calculateOccupancy(256, 0, (void*)registerPressure<3>, "regPressure<3>");
-    calculateOccupancy(256, 0, (void*)registerPressure<6>, "regPressure<6>");
-    calculateOccupancy(256, 0, (void*)registerPressure<9>, "regPressure<9> (many regs)");
-
-    // ===== Part 3: Effect of shared memory on occupancy =====
-    printf("\n--- Part 3: Shared Memory Usage vs Occupancy ---\n");
-    printf("(Block size fixed at 256)\n\n");
-
-    calculateOccupancy(256, 0, (void*)sharedMemPressure<0>, "shmemPressure<0B>");
-    calculateOccupancy(256, 1024, (void*)sharedMemPressure<1024>, "shmemPressure<1KB>");
-    calculateOccupancy(256, 4096, (void*)sharedMemPressure<4096>, "shmemPressure<4KB>");
-    calculateOccupancy(256, 8192, (void*)sharedMemPressure<8192>, "shmemPressure<8KB>");
-    calculateOccupancy(256, 16384, (void*)sharedMemPressure<16384>, "shmemPressure<16KB>");
-
-    // ===== Part 4: Auto-configuration =====
-    printf("\n--- Part 4: Auto-configuration using cudaOccupancyMaxPotentialBlockSize ---\n\n");
-
-    int minGridSize, blockSize;
-    CHECK_CUDA(cudaOccupancyMaxPotentialBlockSize(
-        &minGridSize, &blockSize,
-        (void*)registerPressure<3>, 0, N));
-
-    printf("Recommended block size: %d\n", blockSize);
-    printf("Minimum grid size for full occupancy: %d\n", minGridSize);
-
-    int actualGrid = (N + blockSize - 1) / blockSize;
-    printf("Actual grid size for N=%d: %d\n\n", N, actualGrid);
-
-    // ===== Part 5: Performance with auto vs manual =====
-    printf("--- Part 5: Performance Comparison ---\n\n");
-
-    // Auto-configured
-    float ms_auto = benchmarkKernelFloat(registerPressure<3>, d_a, d_b, d_c, N,
-                                         actualGrid, blockSize, iterations);
-    printf("Auto-configured (bs=%d, gs=%d): %.4f ms\n", blockSize, actualGrid, ms_auto);
-
-    // Manual 256 threads
-    int gs256 = (N + 255) / 256;
-    float ms_256 = benchmarkKernelFloat(registerPressure<3>, d_a, d_b, d_c, N,
-                                        gs256, 256, iterations);
-    printf("Manual 256 (bs=256, gs=%d): %.4f ms\n", gs256, ms_256);
-
-    // Manual 128 threads
-    int gs128 = (N + 127) / 128;
-    float ms_128 = benchmarkKernelFloat(registerPressure<3>, d_a, d_b, d_c, N,
-                                        gs128, 128, iterations);
-    printf("Manual 128 (bs=128, gs=%d): %.4f ms\n", gs128, ms_128);
-
+    
+    // 分配设备内存
+    CHECK_CUDA(cudaMalloc(&d_a, N * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_b, N * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_c, N * sizeof(float)));
+    
+    // 拷贝数据到设备
+    CHECK_CUDA(cudaMemcpy(d_a, h_a, N * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_b, h_b, N * sizeof(float), cudaMemcpyHostToDevice));
+    
+    printf("%-25s %10s %15s\n", "Configuration", "Time(ms)", "Theoretical Occupancy");
+    printf("---------------------------------------------------------\n");
+    
+    // 测试不同寄存器使用量（共享内存=0）
+    float ms;
+    
+    // 16 registers/thread
+    ms = measureKernel(sharedMemPressure<16, 0>, d_a, d_b, d_c, N, blockSize, iterations);
+    printf("%-25s %10.4f %15.1f%%\n", "16 regs, 0 KB shmem", ms, 100.0f);
+    
+    // 32 registers/thread
+    ms = measureKernel(sharedMemPressure<32, 0>, d_a, d_b, d_c, N, blockSize, iterations);
+    printf("%-25s %10.4f %15.1f%%\n", "32 regs, 0 KB shmem", ms, 50.0f);
+    
+    // 64 registers/thread
+    ms = measureKernel(sharedMemPressure<64, 0>, d_a, d_b, d_c, N, blockSize, iterations);
+    printf("%-25s %10.4f %15.1f%%\n", "64 regs, 0 KB shmem", ms, 25.0f);
+    
+    // 128 registers/thread
+    ms = measureKernel(sharedMemPressure<128, 0>, d_a, d_b, d_c, N, blockSize, iterations);
+    printf("%-25s %10.4f %15.1f%%\n", "128 regs, 0 KB shmem", ms, 12.5f);
+    
+    printf("\n");
+    
+    // 测试不同共享内存使用量（寄存器=16）
+    // 4 KB shmem/block
+    ms = measureKernel(sharedMemPressure<16, 4096>, d_a, d_b, d_c, N, blockSize, iterations);
+    printf("%-25s %10.4f %15.1f%%\n", "16 regs, 4 KB shmem", ms, 100.0f);
+    
+    // 8 KB shmem/block
+    ms = measureKernel(sharedMemPressure<16, 8192>, d_a, d_b, d_c, N, blockSize, iterations);
+    printf("%-25s %10.4f %15.1f%%\n", "16 regs, 8 KB shmem", ms, 50.0f);
+    
+    // 16 KB shmem/block
+    ms = measureKernel(sharedMemPressure<16, 16384>, d_a, d_b, d_c, N, blockSize, iterations);
+    printf("%-25s %10.4f %15.1f%%\n", "16 regs, 16 KB shmem", ms, 25.0f);
+    
+    // 32 KB shmem/block
+    ms = measureKernel(sharedMemPressure<16, 32768>, d_a, d_b, d_c, N, blockSize, iterations);
+    printf("%-25s %10.4f %15.1f%%\n", "16 regs, 32 KB shmem", ms, 12.5f);
+    
+    // 清理
     CHECK_CUDA(cudaFree(d_a));
     CHECK_CUDA(cudaFree(d_b));
     CHECK_CUDA(cudaFree(d_c));
-
-    printf("\nKey takeaways:\n");
-    printf("1. Block size should be a multiple of 32 (warp size)\n");
-    printf("2. More registers per thread = fewer blocks per SM = lower occupancy\n");
-    printf("3. More shared memory per block = fewer blocks per SM = lower occupancy\n");
-    printf("4. Use cudaOccupancyMaxPotentialBlockSize for automatic tuning\n");
-    printf("5. The optimal block size depends on your specific kernel\n");
-
+    free(h_a);
+    free(h_b);
+    free(h_c);
+    
+    printf("\nKey Insights:\n");
+    printf("1. Occupancy decreases as register usage per thread increases\n");
+    printf("2. Occupancy decreases as shared memory usage per block increases\n");
+    printf("3. Higher occupancy does not always mean better performance\n");
+    printf("4. The optimal occupancy depends on the kernel's compute/memory ratio\n");
+    
     return 0;
 }
