@@ -2,7 +2,7 @@
  * Chapter 11 - Experiment 11-3: Fast Math Functions Benchmark
  *
  * Compares throughput of standard math functions vs CUDA intrinsics.
- * Compile: nvcc -arch=sm_86 -O3 math_benchmark.cu -o math_benchmark
+ * Compile: nvcc -arch=sm_80 -O3 math_benchmark.cu -o math_benchmark
  * Run: ./math_benchmark
  *
  * Note: Using --use_fast_math flag enables more aggressive compiler
@@ -135,8 +135,9 @@ __global__ void intBitShift(const int * __restrict__ a,
     }
 }
 
-// ===== Benchmark Utility =====
+// ===== Benchmark Utilities =====
 
+// For kernels with one input and one output: void(*)(const float*, float*, int)
 template<typename KernelFunc>
 float benchmark1out(KernelFunc kernel, int n, int gridSize, int blockSize,
                     int iterations, float *d_a, float *d_c) {
@@ -163,6 +164,34 @@ float benchmark1out(KernelFunc kernel, int n, int gridSize, int blockSize,
     return ms / iterations;
 }
 
+// For kernels with two inputs and one output: void(*)(const float*, const float*, float*, int)
+template<typename KernelFunc>
+float benchmark2Input1Output(KernelFunc kernel, int n, int gridSize, int blockSize,
+                              int iterations, float *d_a, float *d_b, float *d_c) {
+    cudaEvent_t start, stop;
+    CHECK_CUDA(cudaEventCreate(&start));
+    CHECK_CUDA(cudaEventCreate(&stop));
+
+    kernel<<<gridSize, blockSize>>>(d_a, d_b, d_c, n);
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    CHECK_CUDA(cudaEventRecord(start, 0));
+    for (int i = 0; i < iterations; i++) {
+        kernel<<<gridSize, blockSize>>>(d_a, d_b, d_c, n);
+    }
+    CHECK_CUDA(cudaEventRecord(stop, 0));
+    CHECK_CUDA(cudaEventSynchronize(stop));
+
+    float ms;
+    CHECK_CUDA(cudaEventElapsedTime(&ms, start, stop));
+
+    CHECK_CUDA(cudaEventDestroy(start));
+    CHECK_CUDA(cudaEventDestroy(stop));
+
+    return ms / iterations;
+}
+
+// For kernels with one input and two outputs: void(*)(const float*, float*, float*, int)
 template<typename KernelFunc>
 float benchmark2out(KernelFunc kernel, int n, int gridSize, int blockSize,
                     int iterations, float *d_a, float *d_s, float *d_c) {
@@ -197,10 +226,10 @@ int main() {
     printf("=== Math Function Benchmark ===\n");
     printf("GPU: %s (SM %d.%d)\n\n", prop.name, prop.major, prop.minor);
 
-    const int N = 8 * 1024 * 1024;  // 8M elements
+    const int N = 2 * 1024 * 1024;  // 2M elements
     const int blockSize = 256;
     const int gridSize = (N + blockSize - 1) / blockSize;
-    const int iterations = 100;
+    const int iterations = 10;
     const size_t bytes = N * sizeof(float);
 
     // Allocate device memory
@@ -234,8 +263,8 @@ int main() {
     float std_ms, fast_ms;
 
     // === Test 1: Division ===
-    std_ms = benchmark1out(standardDiv, N, gridSize, blockSize, iterations, d_a, d_b, d_c);
-    fast_ms = benchmark1out(fastDiv, N, gridSize, blockSize, iterations, d_a, d_b, d_c);
+    std_ms = benchmark2Input1Output(standardDiv, N, gridSize, blockSize, iterations, d_a, d_b, d_c);
+    fast_ms = benchmark2Input1Output(fastDiv, N, gridSize, blockSize, iterations, d_a, d_b, d_c);
     printf("%-40s %10.4f %10s\n", "Standard / (division)", std_ms, "baseline");
     printf("%-40s %10.4f %10.2fx\n", "__fdividef()", fast_ms, std_ms / fast_ms);
 

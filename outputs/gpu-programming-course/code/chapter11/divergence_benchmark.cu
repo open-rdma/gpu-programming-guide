@@ -139,10 +139,10 @@ int main() {
            prop.name, prop.major, prop.minor, prop.warpSize);
     printf("\n");
 
-    const int N = 32 * 1024 * 1024;  // 32M elements
+    const int N = 8 * 1024 * 1024;  // 32M elements
     const int blockSize = 256;  // 8 warps per block
     const int gridSize = (N + blockSize - 1) / blockSize;
-    const int iterations = 100;
+    const int iterations = 20;
     const size_t bytes = N * sizeof(float);
 
     // Allocate device memory

@@ -50,7 +50,7 @@
 | 64-bit FP add/mul/fma | 64 | 4 | 4 | 32 | 4 | 32 | 32 | 2 |
 | 32-bit FP 特殊函数 | 32 | 32 | 32 | 16 | 32 | 16 | 16 | 16 |
 | 32-bit INT add/sub | 160 | 128 | 128 | 64 | 128 | 64 | 64 | 64 |
-| 32-bit INT mul/mad | 32 | 多指令 | 多指令 | 多指令 | 多指令 | 64 | 64 | 64 |
+| 32-bit INT mul/mad | 32 | 32 | 32 | 32 | 64 | 64 | 64 | 64 |
 | 32-bit INT shift | 64 | 64 | 64 | 32 | 64 | 64 | 64 | 64 |
 | 32-bit 位运算 AND/OR/XOR | 160 | 128 | 128 | 64 | 128 | 64 | 64 | 64 |
 | warp shuffle | 32 | 32 | 32 | 32 | 32 | 32 | 32 | 32 |
@@ -80,7 +80,7 @@ float y = x / z;
 float y = __fdividef(x, z);
 ```
 
-`__fdividef()` 提供比除法运算符更快的单精度浮点除法。权衡：对于非正规数（denormalized numbers），结果可能与 IEEE 754 标准有细微差异。
+`__fdividef()`  提供比除法运算符更快的单精度浮点除法。需要特别注意：当分母的绝对值在 **2^126 < |分母| < 2^128** 且分子为有限值时，该函数会直接返回 `0`，而不是 IEEE 754 标准下的正确结果。因此，在使用该函数加速除法时，必须确保数据范围不会落入这一“精确失效”区间。对于非正规数等其他情况，结果也可能与标准除法存在差异，但上述边界行为是最显著的偏差。
 
 #### 快速倒数平方根：`rsqrtf()`
 
@@ -352,7 +352,7 @@ T __shfl_xor_sync(unsigned mask, T var, int laneMask, int width=warpSize);
 
 #### `width` 参数
 
-所有 `__shfl_sync()` intrinsic 都接受一个可选的 `width` 参数。`width` 必须是2的幂（2, 4, 8, 16 或 32），且不能大于 `warpSize`。它将 warp 分割成多个宽度为 `width` 的子段，每个子段独立执行 shuffle。
+所有 `__shfl_sync()` intrinsic 都接受一个可选的 `width` 参数（必须为 2 的幂，≤ warpSize）。其作用是**限定参与通信的逻辑 lane ID 范围为 `[0, width-1]`**：范围外的线程不参与数据交换，shuffle 返回其自身的 `var` 值。这与“将 warp 分割成多个并行通信的独立子段”有本质区别——需要多子段通信时，需手动处理逻辑 lane ID。
 
 #### Shuffle 函数详解
 
