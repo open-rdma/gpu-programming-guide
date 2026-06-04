@@ -194,16 +194,16 @@ CUDA Programming Guide 还介绍了 <strong>Warp Specialization</strong>（空�
 - 两者之间通过两个 `cuda::barrier` 实现"缓冲区就绪"和"缓冲区已填充"的信号传递。
 
 ```cuda
-#include &lt;cuda/barrier&gt;
-#include &lt;cooperative_groups.h&gt;
+#include <cuda/barrier>
+#include <cooperative_groups.h>
 
-using barrier = cuda::barrier&lt;cuda::thread_scope::thread_scope_block&gt;;
+using barrier = cuda::barrier<cuda::thread_scope::thread_scope_block>;
 
 __device__ void producer(barrier ready[], barrier filled[],
                          float* buffer, float* in, int N, int buffer_len)
 {
     for (int i = 0; i < (N/buffer_len); ++i) {
-        ready[i%2].arrive_and_wait();  /* 等待缓冲区就绪 */
+        ready[i%2].wait();  // 只等待，不 arrive（arrive 由消费者完成）
         /* 生产数据，填充 buffer_(i%2) */
         barrier::arrival_token token = filled[i%2].arrive();
         /* buffer_(i%2) 已填满——不等待，继续下一个迭代 */
@@ -216,7 +216,7 @@ __device__ void consumer(barrier ready[], barrier filled[],
     barrier::arrival_token token1 = ready[0].arrive(); /* buffer_0 就绪 */
     barrier::arrival_token token2 = ready[1].arrive(); /* buffer_1 就绪 */
     for (int i = 0; i < (N/buffer_len); ++i) {
-        filled[i%2].arrive_and_wait(); /* 等待缓冲区被填满 */
+        filled[i%2].wait(); // 只等待，不 arrive（arrive 由生产者完成）
         /* 消费 buffer_(i%2) */
         barrier::arrival_token token = ready[i%2].arrive();
         /* buffer_(i%2) 已消费完，可以重新填充 */
@@ -225,19 +225,25 @@ __device__ void consumer(barrier ready[], barrier filled[],
 
 __global__ void producer_consumer_pattern(int N, int buffer_len,
                                            float* in, float* out) {
-    // 双缓冲: buffer_0 = buffer, buffer_1 = buffer + buffer_len
     __shared__ extern float buffer[];
-
-    // bar[0]/bar[1] 跟踪 buffer_0/buffer_1 是否就绪
-    // bar[2]/bar[3] 跟踪 buffer_0/buffer_1 是否已填满
-    __shared__ barrier bar[4];
+    __shared__ barrier bar[4];  // bar[0]=ready0, bar[1]=ready1, bar[2]=filled0, bar[3]=filled1
 
     auto block = cooperative_groups::this_thread_block();
-    if (block.thread_rank() < 4)
-        init(bar + block.thread_rank(), block.size());
+    int tid = block.thread_rank();
+    int num_threads = block.size();
+    const int prod_count = warpSize;            // 生产者线程数 = 32
+    const int cons_count = num_threads - warpSize;  // 消费者线程数
+
+    // 正确初始化：ready 屏障期望消费者线程数，filled 屏障期望生产者线程数
+    if (tid == 0) {
+        init(&bar[0], cons_count);  // ready0
+        init(&bar[1], cons_count);  // ready1
+        init(&bar[2], prod_count);  // filled0
+        init(&bar[3], prod_count);  // filled1
+    }
     block.sync();
 
-    if (block.thread_rank() < warpSize)
+    if (tid < warpSize)
         producer(bar, bar+2, buffer, in, N, buffer_len);
     else
         consumer(bar, bar+2, buffer, out, N, buffer_len);
@@ -450,7 +456,7 @@ __global__ void single_stage_kernel(int *data, int *result, size_t size) {
 多阶段 Pipeline 才是真正展现实力的地方。通过使用多个共享内存缓冲区（"阶段"），你可以让数据拷贝和计算<strong>完全重叠</strong>：
 
 ```cuda
-#include &lt;cuda/pipeline&gt;
+#include <cuda/pipeline>
 
 constexpr int stages = 2; // 双缓冲
 
@@ -465,13 +471,13 @@ __global__ void pipeline_kernel(int *data, int *result, size_t size) {
     }
 
     // 创建多阶段 pipeline
-    __shared__ cuda::pipeline_shared_state&lt;
-        cuda::thread_scope::thread_scope_block, stages&gt; shared_state;
+    __shared__ cuda::pipeline_shared_state<
+        cuda::thread_scope::thread_scope_block, stages> shared_state;
     auto pipeline = cuda::make_pipeline(block, &shared_state);
 
     size_t num_blocks = size / block.size();
 
-    // 预热：先发起前 stages 个拷贝
+    // 预热：先发起前 stages-1 个拷贝
     for (int stage = 0; stage < stages - 1; stage++) {
         pipeline.producer_acquire();
         cuda::memcpy_async(block, buffer[stage], data + stage * block.size(),
@@ -479,11 +485,18 @@ __global__ void pipeline_kernel(int *data, int *result, size_t size) {
         pipeline.producer_commit();
     }
 
-    // 主循环：消费和生产的流水线重叠
+    // 主循环：先消费，再生产，避免 pipeline 队列满导致死锁
     for (size_t i = 0; i < num_blocks - (stages - 1); i++) {
         int stage = i % stages;
 
-        // 生产下一批数据（异步拷贝）
+        // 先等待并消费当前阶段的数据（由之前的生产提供）
+        pipeline.consumer_wait();
+        for (int j = threadIdx.x; j < block.size(); j += block.size()) {
+            result[i * block.size() + j] = buffer[stage][j] * 2;
+        }
+        pipeline.consumer_release();
+
+        // 再生产下一批数据（异步拷贝）
         pipeline.producer_acquire();
         size_t producer_offset = (i + stages - 1) * block.size();
         if (producer_offset < size) {
@@ -492,13 +505,6 @@ __global__ void pipeline_kernel(int *data, int *result, size_t size) {
                                sizeof(int) * block.size(), pipeline);
         }
         pipeline.producer_commit();
-
-        // 消费当前阶段的数据
-        pipeline.consumer_wait();
-        for (int j = threadIdx.x; j < block.size(); j += block.size()) {
-            result[i * block.size() + j] = buffer[stage][j] * 2;
-        }
-        pipeline.consumer_release();
     }
 
     // 排空：处理剩余的 stages-1 个阶段
@@ -671,111 +677,75 @@ NVIDIA Nsight Compute 提供了针对异步操作的专门指标：
 #include <cuda/barrier>
 #include <cooperative_groups.h>
 
+using namespace cooperative_groups;
 using barrier = cuda::barrier<cuda::thread_scope::thread_scope_block>;
 
-// 生产者：负责加载数据
-__device__ void producer_work(barrier &ready, barrier &filled,
-                              float *buf, const float *__restrict__ global_in,
-                              int block_start, int buffer_len)
-{
-    // 等待缓冲区就绪
-    ready.arrive_and_wait();
-
-    // 加载数据到共享内存缓冲区（异步）
-    auto block = cooperative_groups::this_thread_block();
-    // 使用 memcpy_async 进行异步加载
-    cuda::memcpy_async(block, buf, global_in + block_start,
-                       sizeof(float) * buffer_len, filled);
-
-    // 生产者不需要等待加载完成——它在 filled barrier 上 arrive
-    // filled.consumer 会等到数据加载完成
-}
-
-// 消费者：负责计算
-__device__ void consumer_work(barrier &ready, barrier &filled,
-                              float *buf, float *global_out,
-                              int block_start, int buffer_len)
-{
-    // 等待数据被填满
-    filled.arrive_and_wait();
-
-    // 数据就绪，进行计算
-    for (int i = threadIdx.x; i < buffer_len; i += blockDim.x) {
-        global_out[block_start + i] = buf[i] * 2.0f + 1.0f;
-    }
-
-    // 通知生产者缓冲区可以被重新填充
-    ready.arrive();
-}
-
-__global__ void full_producer_consumer(
+__global__ void producer_consumer_corrected(
     const float *__restrict__ global_in,
     float *__restrict__ global_out,
     int N, int buffer_len)
 {
-    // 双缓冲区
     __shared__ extern float buffer[];
-    float *buf_a = buffer;                     // buffer_0
-    float *buf_b = buffer + buffer_len;        // buffer_1
+    float *buf_a = buffer;
+    float *buf_b = buffer + buffer_len;
 
-    // 四个 barrier：
-    // ready[0/1]：buf_0/1 就绪（可以被填充）
-    // filled[0/1]：buf_0/1 已填满（可以被消费）
-    // ready 由消费者释放，filled 由生产者填充
     __shared__ barrier ready[2];
     __shared__ barrier filled[2];
 
-    auto block = cooperative_groups::this_thread_block();
+    auto block = this_thread_block();
     int tid = block.thread_rank();
 
-    // 初始化 barrier
-    if (tid < 2) {
-        init(&ready[tid], block.size());
-        init(&filled[tid], block.size());
-    }
-    block.sync();
+    const int prod_count = warpSize;                // 生产者线程数（正好1个warp）
+    const int cons_count = block.size() - prod_count; // 消费者线程数
 
-    // 空间分割：warp 0 是生产者，其余 warp 是消费者
-    bool is_producer = (tid / warpSize) == 0;
+    if (tid == 0) {
+        init(&ready[0], cons_count);  // ready：消费者arrive，生产者wait
+        init(&ready[1], cons_count);
+        init(&filled[0], prod_count); // filled：生产者arrive，消费者wait
+        init(&filled[1], prod_count);
+    }
+    block.sync(); // 确保所有线程看到初始化完成的屏障
+
+    // tiled_partition<32>将block分成多个32线程的tile，第一个tile正好是生产者线程（tid 0-31）
+    auto producer_group = tiled_partition<warpSize>(block);
+
+    bool is_producer = (tid < prod_count);
+    int total_blocks = N / buffer_len;
 
     if (is_producer) {
-        // 预热：消费者需要 ready 信号才知道可以开始填充
-        // 但生产者首先需要等待消费者释放 ready
-        filled[0].arrive_and_wait();  // 标记 buf_0 已"填充"（初始为空需要此操作来完成初始化）
-
-        int total_blocks = N / buffer_len;
         for (int b = 0; b < total_blocks; b++) {
             int buf_idx = b % 2;
             int block_start = b * buffer_len;
 
-            ready[buf_idx].arrive_and_wait();  // 等待缓冲区就绪
+            ready[buf_idx].wait(); // 等待消费者释放缓冲区
 
-            // 异步加载
-            cuda::memcpy_async(block, (buf_idx == 0 ? buf_a : buf_b),
+            // 1. 只有生产者线程调用，group中所有线程都参与，符合CUDA语义
+            // 2. 整个生产者group合作拷贝整个缓冲区，只发起1次拷贝，无重复
+            // 3. 拷贝完成后，每个生产者线程自动在filled上arrive一次（共32次，正好匹配期望计数）
+            cuda::memcpy_async(producer_group,
+                               (buf_idx == 0 ? buf_a : buf_b),
                                global_in + block_start,
                                sizeof(float) * buffer_len,
                                filled[buf_idx]);
         }
     } else {
-        // 消费者：先通知生产者所有缓冲区初始可用
+        // 所有消费者发出初始信号：两个缓冲区初始都可用
         ready[0].arrive();
         ready[1].arrive();
 
-        int total_blocks = N / buffer_len;
         for (int b = 0; b < total_blocks; b++) {
             int buf_idx = b % 2;
             int block_start = b * buffer_len;
 
-            filled[buf_idx].arrive_and_wait();  // 等待缓冲区被填满
+            filled[buf_idx].wait(); // 等待生产者填充数据完成
 
-            // 消费数据
+            // 消费数据（索引完全正确）
             float *curr_buf = (buf_idx == 0 ? buf_a : buf_b);
-            for (int i = tid; i < buffer_len; i += block.size()) {
+            for (int i = tid - prod_count; i < buffer_len; i += cons_count) {
                 global_out[block_start + i] = curr_buf[i] * 2.0f + 1.0f;
             }
 
-            // 通知生产者缓冲区就绪
-            ready[buf_idx].arrive();
+            ready[buf_idx].arrive(); // 通知生产者缓冲区已释放
         }
     }
 }
@@ -790,10 +760,11 @@ __global__ void full_producer_consumer(
 // 编译: nvcc -arch=sm_80 async_pipeline_demo.cu -o async_pipeline_demo
 // 硬件要求: NVIDIA Ampere A100 或更新 (CC 8.0+)
 
-#include &lt;stdio.h&gt;
-#include &lt;stdlib.h&gt;
-#include &lt;cuda/pipeline&gt;
-#include &lt;cooperative_groups.h&gt;
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <cuda/pipeline>
+#include <cooperative_groups.h>
 
 #define CUDA_CHECK(call)                                             \
     do {                                                             \
@@ -819,23 +790,21 @@ __global__ void pipeline_demo_kernel(
 
     // 每个阶段一个缓冲区
     float *buffer[stages];
-    for (int s = 0; s < stages; s++) {
+    for (int s = 0; s < stages; ++s) {
         buffer[s] = shared_buffers + s * threads_per_block;
     }
 
-    // 创建 3 阶段 pipeline
-    __shared__ cuda::pipeline_shared_state&lt;
-        cuda::thread_scope::thread_scope_block, stages&gt; pipe_state;
+    // 创建 pipeline 状态
+    __shared__ cuda::pipeline_shared_state<
+        cuda::thread_scope::thread_scope_block, stages> pipe_state;
     auto pipe = cuda::make_pipeline(block, &pipe_state);
 
     size_t total_blocks = total_elements / threads_per_block;
     size_t block_id = block.group_index().x;
+    if (block_id != 0) return;   // 只用一个块演示
 
-    // 只有第一个块执行（简化演示）
-    if (block_id != 0) return;
-
-    // 预热流水线：填充前 (stages-1) 个阶段
-    for (int s = 0; s < stages - 1; s++) {
+    // 预热：填充前 (stages-1) 个批次 
+    for (int s = 0; s < stages - 1; ++s) {
         pipe.producer_acquire();
         cuda::memcpy_async(block, buffer[s],
                            input + s * threads_per_block,
@@ -843,51 +812,56 @@ __global__ void pipeline_demo_kernel(
         pipe.producer_commit();
     }
 
-    // 流水线稳态
-    for (size_t i = 0; i < total_blocks - (stages - 1); i++) {
-        int stage = i % stages;
+    // 流水线状态 ：消费 + 生产 
+    for (size_t i = 0; i < total_blocks - (stages - 1); ++i) {
+        // 1. 等待当前批次就绪（消费者）
+        pipe.consumer_wait();
+        int tid = threadIdx.x;
+        int cons_buf_idx = i % stages;                 // 当前批次应该所在的缓冲区
+        float *curr_buf = buffer[cons_buf_idx];
 
-        // 生产者：发起下一批数据的异步拷贝
+        // 计算（每个线程独立处理自己的元素）
+        float val = curr_buf[tid] * scale + 1.0f;
+        // 写回全局内存
+        output[i * threads_per_block + tid] = val;
+
+        pipe.consumer_release();   // 释放当前缓冲区，允许生产者复用
+
+        // 2. 为未来批次准备数据（生产者）
         pipe.producer_acquire();
-        size_t next_batch = i + stages - 1;
+        size_t next_batch = i + stages - 1;            // 要准备的下一个批次索引
         if (next_batch < total_blocks) {
-            cuda::memcpy_async(block, buffer[stage],
+            int prod_buf_idx = (i + stages - 1) % stages;   // 正确的目标缓冲区索引
+            cuda::memcpy_async(block, buffer[prod_buf_idx],
                                input + next_batch * threads_per_block,
                                sizeof(float) * threads_per_block, pipe);
         }
         pipe.producer_commit();
-
-        // 消费者：处理当前阶段的数据
-        pipe.consumer_wait();
-        int tid = threadIdx.x;
-        buffer[stage][tid] = buffer[stage][tid] * scale + 1.0f;
-        __syncthreads();
-        // 写回
-        output[i * threads_per_block + tid] = buffer[stage][tid];
-        pipe.consumer_release();
     }
 
-    // 排空流水线：处理最后 (stages-1) 个阶段
-    for (size_t i = total_blocks - (stages - 1); i < total_blocks; i++) {
-        int stage = i % stages;
+    //  排空：处理最后 (stages-1) 个批次 
+    for (size_t i = total_blocks - (stages - 1); i < total_blocks; ++i) {
         pipe.consumer_wait();
         int tid = threadIdx.x;
-        buffer[stage][tid] = buffer[stage][tid] * scale + 1.0f;
-        __syncthreads();
-        output[i * threads_per_block + tid] = buffer[stage][tid];
+        int cons_buf_idx = i % stages;
+        float *curr_buf = buffer[cons_buf_idx];
+
+        float val = curr_buf[tid] * scale + 1.0f;
+        output[i * threads_per_block + tid] = val;
+
         pipe.consumer_release();
     }
 }
 
 int main() {
-    const size_t N = threads_per_block * 100; // 100个批次
+    const size_t N = threads_per_block * 100;
     const size_t bytes = N * sizeof(float);
     const float scale = 2.0f;
 
-    // 主机内存
+    // 主机数据
     float *h_input = (float *)malloc(bytes);
     float *h_output = (float *)malloc(bytes);
-    for (size_t i = 0; i < N; i++) {
+    for (size_t i = 0; i < N; ++i) {
         h_input[i] = (float)(i % 100) / 100.0f;
     }
 
@@ -897,21 +871,19 @@ int main() {
     CUDA_CHECK(cudaMalloc(&d_output, bytes));
     CUDA_CHECK(cudaMemcpy(d_input, h_input, bytes, cudaMemcpyHostToDevice));
 
-    // 启动 pipeline 核函数
+    // 启动核函数
     size_t shared_mem = stages * threads_per_block * sizeof(float);
-    pipeline_demo_kernel&lt;&lt;&lt;1, threads_per_block, shared_mem&gt;&gt;&gt;(
+    pipeline_demo_kernel<<<1, threads_per_block, shared_mem>>>(
         d_input, d_output, N, scale);
-
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    // 验证
+    // 验证结果
     CUDA_CHECK(cudaMemcpy(h_output, d_output, bytes, cudaMemcpyDeviceToHost));
     bool correct = true;
-    for (size_t i = 0; i < N; i++) {
+    for (size_t i = 0; i < N; ++i) {
         float expected = h_input[i] * scale + 1.0f;
         if (fabsf(h_output[i] - expected) > 1e-5f) {
-            printf("Mismatch at %zu: GPU %f vs CPU %f\n",
-                   i, h_output[i], expected);
+            printf("Mismatch at %zu: GPU %f vs CPU %f\n", i, h_output[i], expected);
             correct = false;
             break;
         }
@@ -925,7 +897,7 @@ int main() {
 }
 ```
 
-### 流水线效率分析
+### 13.10.1 流水线效率分析
 
 多阶段 Pipeline 的关键优势在于：当生产者（数据拷贝）在处理阶段 N 时，消费者（计算）同时处理阶段 N-1。通过 `stages` 个缓冲区，实现了以下重叠：
 
@@ -939,7 +911,7 @@ int main() {
 
 在稳态下，Load 和 Compute 完全重叠。阶段数越多，越容易在拷贝延迟波动时维持重叠，但也会消耗更多共享内存。
 
-## 13.8 同步机制的对比
+## 13.11 同步机制的对比
 
 | 特性 | `__syncthreads()` | `cuda::barrier` | `cuda::pipeline` |
 |------|------------------|-----------------|-----------------|
@@ -957,9 +929,9 @@ CUDA Programming Guide 也给出了建议：
 
 即：对于不需要异步重叠的简单同步场景，使用传统的 `__syncthreads()` 仍然是最优选择。
 
-## 13.9 异步操作的调试与错误处理
+## 13.12 异步操作的调试与错误处理
 
-### 13.9.1 常见问题诊断
+### 13.12.1 常见问题诊断
 
 使用异步操作时，常见的问题包括：
 
@@ -990,15 +962,15 @@ bar.wait(std::move(token));  // 使用 phase N 的过期 token
 
 <strong>4. Pipeline 阶段溢出</strong>：`producer_acquire()` 超过 pipeline 的阶段数导致死锁。
 
-### 13.9.2 使用环境变量和工具调试
+### 13.12.2 使用环境变量和工具调试
 
 - `CUDA_LAUNCH_BLOCKING=1`：使所有 kernel 启动变为同步，便于隔离问题；
 - `cuda-memcheck` 工具检测共享内存的非法访问；
 - NVIDIA Compute Sanitizer 可以检测异步操作中的数据竞争。
 
-## 13.10 高级 Pipeline 模式
+## 13.13 高级 Pipeline 模式
 
-### 13.10.1 Pipeline 与 GEMM 的软件流水线
+### 13.13.1 Pipeline 与 GEMM 的软件流水线
 
 在矩阵乘法（GEMM）中，多阶段 Pipeline 用于实现 Global-to-Shared 内存拷贝与 Tensor Core 计算的重叠：
 
@@ -1066,7 +1038,7 @@ __global__ void gemm_pipeline(
 }
 ```
 
-### 13.10.2 动态阶段数选择
+### 13.13.2 动态阶段数选择
 
 Pipeline 的阶段数涉及权衡：
 
@@ -1084,7 +1056,7 @@ int select_pipeline_stages(size_t tile_bytes, size_t smem_per_block) {
 }
 ```
 
-### 13.10.3 Pipeline 交错模式
+### 13.13.3 Pipeline 交错模式
 
 ```cuda
 // 双 Pipeline 交错
@@ -1101,7 +1073,7 @@ pa.consumer_wait(); compute_a(); pa.consumer_release();
 pb.consumer_wait(); compute_b(); pb.consumer_release();
 ```
 
-## 13.11 与主机端异步操作的对比
+## 13.14 与主机端异步操作的对比
 
 | 特性 | 主机端异步 (cudaMemcpyAsync) | 设备端异步 (memcpy_async) |
 |------|---------------------------|-------------------------|
@@ -1114,9 +1086,9 @@ pb.consumer_wait(); compute_b(); pb.consumer_release();
 
 两种异步方式可以<strong>同时使用</strong>：设备端 pipeline 负责细粒度的 Global→Shared 重叠，主机端 Stream 负责不同 kernel 间的粗粒度重叠。
 
-## 13.13 常见问题与故障排除
+## 13.15 常见问题与故障排除
 
-### 13.13.1 `cuda::barrier` 死锁
+### 13.15.1 `cuda::barrier` 死锁
 
 <strong>症状</strong>：所有线程卡在 `bar.wait()` 调用上。
 
@@ -1130,7 +1102,7 @@ pb.consumer_wait(); compute_b(); pb.consumer_release();
 - 确保所有参与线程都在同一个代码路径中调用 `arrive()`；
 - 每次迭代使用新的 token。
 
-### 13.13.2 Pipeline 死锁
+### 13.15.2 Pipeline 死锁
 
 <strong>症状</strong>：`producer_acquire()` 永不返回。
 
@@ -1146,7 +1118,7 @@ for (int i = 0; i < num_iter; i++) {
 // 几个迭代后死锁
 ```
 
-### 13.13.3 `memcpy_async` 性能差
+### 13.15.3 `memcpy_async` 性能差
 
 <strong>常见原因</strong>：
 1. 拷贝大小不是 16 字节的倍数（回退到逐字节拷贝）；
@@ -1160,7 +1132,7 @@ for (int i = 0; i < num_iter; i++) {
 - 确保全局内存基地址 128 字节对齐；
 - 在 commit/wait 前使用 `__syncwarp()` 恢复 warp 收敛。
 
-### 13.13.4 数据完整性错误
+### 13.15.4 数据完整性错误
 
 <strong>症状</strong>：某些输出值不正确或为零。
 
@@ -1170,7 +1142,7 @@ for (int i = 0; i < num_iter; i++) {
 3. 确认 `producer_commit()` 在所有异步拷贝之后调用；
 4. 检查 `fence_proxy_async_shared_cta()` 是否在写回前调用（如果使用 TMA）。
 
-## 13.14 性能基准参考
+## 13.16 性能基准参考
 
 以下是在 A100 (CC 8.0) 上进行批量数据处理（100 批次，256 个 float 每批次）的性能参考：
 
@@ -1189,7 +1161,7 @@ for (int i = 0; i < num_iter; i++) {
 2. 多阶段 pipeline 带来显著提升（2-stage 比单阶段快 36%）；
 3. 从 3-stage 到 4-stage 的增量很小，因为瓶颈从拷贝转向了计算。
 
-## 13.15 迁移指南：从 __syncthreads 到异步模型
+## 13.17 迁移指南：从 __syncthreads 到异步模型
 
 如果你的现有代码使用传统的 `__syncthreads()` 模式，迁移到异步模型应该循序渐进：
 
@@ -1248,7 +1220,7 @@ for (int i = 0; i < n; i++) {
 - 验证计算和数据拷贝是否有实际重叠；
 - 调整 pipeline 阶段数以平衡共享内存和吞吐量。
 
-## 13.16 动手体验2：异步归约
+## 13.18 动手体验2：异步归约
 
 在第 12 章我们使用 Thread Block Cluster + DSM 进行分布式归约。这里展示一个使用 `cuda::barrier` 进行分阶段异步归约的替代方案：
 
@@ -1330,7 +1302,7 @@ for (int i = 0; i < n; i++) {
 }
 ```
 
-## 13.17 本章小结
+## 13.19 本章小结
 
 本章全面介绍了 CUDA 异步 SIMT 编程模型，涵盖以下要点：
 
@@ -1348,7 +1320,7 @@ for (int i = 0; i < n; i++) {
 
 异步 SIMT 编程模型是现代 GPU 编程中不可或缺的工具。随着 GPU 内存带宽与计算能力之间的差距不断拉大，将数据搬运隐藏在计算之后变得愈发重要。掌握这些 API 将显著提升你的 CUDA 程序性能。
 
-## 13.10 习题
+## 13.20 习题
 
 1. 解释 `cuda::barrier` 的"时间分割"（Temporal Splitting）五阶段模型。为什么 arrive 和 wait 之间的阶段是实现重叠的关键？
 
@@ -1362,7 +1334,7 @@ for (int i = 0; i < n; i++) {
 
 6. 说明 Warp Specialization 模式中为什么需要 4 个 barrier（2×2双缓冲），而不是 2 个。
 
-## 13.11 参考文献
+## 13.21 参考文献
 
 1. CUDA C++ Programming Guide 13.0, Section 5.5 "Asynchronous SIMT Programming Model"
 2. CUDA C++ Programming Guide 13.0, Section 10.26 "Asynchronous Barrier"
