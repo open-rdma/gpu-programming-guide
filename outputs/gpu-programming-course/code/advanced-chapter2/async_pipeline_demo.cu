@@ -1,6 +1,6 @@
 // 文件: async_pipeline_demo.cu
-// 编译: nvcc -arch=sm_80 async_pipeline_demo.cu -o async_pipeline_demo
-// 硬件要求: NVIDIA Ampere A100 或更新 (CC 8.0+)
+// 编译: nvcc -arch=sm_80 -std=c++17 async_pipeline_demo.cu -o async_pipeline_demo
+// 硬件要求: NVIDIA Ampere A100/A800 (CC 8.0+)
 // 第13章 异步SIMT编程模型 - 多阶段Pipeline示例
 
 #include <stdio.h>
@@ -31,16 +31,21 @@ __global__ void pipeline_demo_kernel(
     extern __shared__ float shared_buffers[];
     auto block = cooperative_groups::this_thread_block();
 
-    // 每个阶段一个缓冲区
+    // 每个阶段一个独立缓冲区
     float *buffer[stages];
     for (int s = 0; s < stages; s++) {
         buffer[s] = shared_buffers + s * threads_per_block;
     }
 
-    // 创建 3 阶段 pipeline
-    __shared__ cuda::pipeline_shared_state<
-        cuda::thread_scope::thread_scope_block, stages> pipe_state;
-    auto pipe = cuda::make_pipeline(block, &pipe_state);
+    // 【修复编译警告】使用对齐的char数组避免动态初始化
+    __shared__ alignas(alignof(cuda::pipeline_shared_state<
+        cuda::thread_scope::thread_scope_block, stages>)) char pipe_state[
+            sizeof(cuda::pipeline_shared_state<
+                cuda::thread_scope::thread_scope_block, stages>)];
+    
+    auto pipe = cuda::make_pipeline(block, 
+        reinterpret_cast<cuda::pipeline_shared_state<
+            cuda::thread_scope::thread_scope_block, stages>*>(pipe_state));
 
     size_t total_blocks = total_elements / threads_per_block;
     size_t block_id = block.group_index().x;
@@ -59,13 +64,15 @@ __global__ void pipeline_demo_kernel(
 
     // 流水线稳态
     for (size_t i = 0; i < total_blocks - (stages - 1); i++) {
-        int stage = i % stages;
+        // 【核心修复】生产者和消费者使用不同的缓冲区索引，避免数据竞争
+        int producer_stage = (i + stages - 1) % stages;
+        int consumer_stage = i % stages;
 
         // 生产者：发起下一批数据的异步拷贝
         pipe.producer_acquire();
         size_t next_batch = i + stages - 1;
         if (next_batch < total_blocks) {
-            cuda::memcpy_async(block, buffer[stage],
+            cuda::memcpy_async(block, buffer[producer_stage],
                                input + next_batch * threads_per_block,
                                sizeof(float) * threads_per_block, pipe);
         }
@@ -74,21 +81,19 @@ __global__ void pipeline_demo_kernel(
         // 消费者：处理当前阶段的数据
         pipe.consumer_wait();
         int tid = threadIdx.x;
-        buffer[stage][tid] = buffer[stage][tid] * scale + 1.0f;
-        __syncthreads();
-        // 写回
-        output[i * threads_per_block + tid] = buffer[stage][tid];
+        buffer[consumer_stage][tid] = buffer[consumer_stage][tid] * scale + 1.0f;
+        // 移除不必要的__syncthreads()（每个线程只写自己的元素，无依赖）
+        output[i * threads_per_block + tid] = buffer[consumer_stage][tid];
         pipe.consumer_release();
     }
 
     // 排空流水线：处理最后 (stages-1) 个阶段
     for (size_t i = total_blocks - (stages - 1); i < total_blocks; i++) {
-        int stage = i % stages;
+        int consumer_stage = i % stages;
         pipe.consumer_wait();
         int tid = threadIdx.x;
-        buffer[stage][tid] = buffer[stage][tid] * scale + 1.0f;
-        __syncthreads();
-        output[i * threads_per_block + tid] = buffer[stage][tid];
+        buffer[consumer_stage][tid] = buffer[consumer_stage][tid] * scale + 1.0f;
+        output[i * threads_per_block + tid] = buffer[consumer_stage][tid];
         pipe.consumer_release();
     }
 }
@@ -110,12 +115,13 @@ int main() {
     CUDA_CHECK(cudaMalloc(&d_input, bytes));
     CUDA_CHECK(cudaMalloc(&d_output, bytes));
     CUDA_CHECK(cudaMemcpy(d_input, h_input, bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(d_output, 0, bytes));
 
     // 启动 pipeline 核函数
     size_t shared_mem = stages * threads_per_block * sizeof(float);
     pipeline_demo_kernel<<<1, threads_per_block, shared_mem>>>(
         d_input, d_output, N, scale);
-
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
     // 验证
@@ -132,8 +138,10 @@ int main() {
     }
     printf("Result: %s\n", correct ? "PASS" : "FAIL");
 
+    // 清理
     free(h_input); free(h_output);
     CUDA_CHECK(cudaFree(d_input));
     CUDA_CHECK(cudaFree(d_output));
+
     return correct ? 0 : 1;
 }
