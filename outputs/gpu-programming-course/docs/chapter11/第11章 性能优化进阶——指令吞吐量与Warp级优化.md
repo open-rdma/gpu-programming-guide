@@ -41,7 +41,7 @@
 
 下表给出了各种算术指令的本机硬件支持吞吐量（每个时钟周期每个多处理器的结果数），数据来源于 CUDA 11.5.1 Programming Guide：
 
-<strong>表 11.1 本机算术指令吞吐量</strong>（结果数/时钟周期/多处理器）
+<strong>表 11.1 本机算术指令吞吐量</strong>（操作数/时钟周期/多处理器）
 
 | 指令类型 | 3.5/3.7 | 5.0/5.2 | 5.3 | 6.0 | 6.1/6.2 | 7.x | 8.0 | 8.6 |
 |---------|---------|---------|-----|-----|---------|-----|-----|-----|
@@ -356,7 +356,7 @@ T __shfl_xor_sync(unsigned mask, T var, int laneMask, int width=warpSize);
 
 #### Shuffle 函数详解
 
-<strong>`__shfl_sync(mask, var, srcLane, width)`</strong>：返回由 `srcLane` 指定的 lane 持有的 `var` 值。如果 `width < warpSize`，每个子段表现为具有从0开始的逻辑 lane ID 的独立实体。如果 `srcLane` 超出 `[0:width-1]` 范围，返回的值对应于 `srcLane % width` 处的 lane 的值。
+<strong>`__shfl_sync(mask, var, srcLane, width)`</strong>：返回由 `srcLane` 指定的 lane 持有的 `var` 值。如果 `width < warpSize`，每个子段表现为具有从0开始的逻辑 lane ID 的独立实体。`srcLane` 必须在 `[0:width-1]` 范围内，否则返回值未定义。越界访问可能导致数据错误或程序崩溃，因此调用前务必保证 `srcLane` 合法。
 
 ```cuda
 // 广播：lane 0 的值到整个 warp
@@ -480,19 +480,21 @@ __global__ void reduce_smem(float *input, float *output, int n) {
     __shared__ float sdata[256];
     int tid = threadIdx.x;
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
-    
+
     sdata[tid] = (idx < n) ? input[idx] : 0.0f;
     __syncthreads();
-    
+
+    // 跨 warp 归约
     for (int s = blockDim.x / 2; s > 32; s >>= 1) {
         if (tid < s)
             sdata[tid] += sdata[tid + s];
         __syncthreads();
     }
-    
-    // 最后32个元素用 warp shuffle
+
+    // 最后 64 个元素合并为 32 个，再使用 warp shuffle
     if (tid < 32) {
-        float val = sdata[tid];
+        float val = sdata[tid] + sdata[tid + 32];  // 先合并 s=32 这一级
+        __syncthreads();  // 理论上可省略，但保留以确保共享内存写入可见
         for (int offset = 16; offset > 0; offset >>= 1)
             val += __shfl_xor_sync(0xffffffff, val, offset);
         if (tid == 0)
