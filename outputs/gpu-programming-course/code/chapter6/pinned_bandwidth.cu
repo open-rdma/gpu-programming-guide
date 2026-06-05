@@ -144,8 +144,6 @@ int main()
     CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
     printf("Device: %s (CC %d.%d)\n", prop.name, prop.major,
            prop.minor);
-    printf("PCIe Generation: %d\n",
-           prop.pcieGUIDisplayDevice ? 3 : 3); // 简化显示
     printf("\n");
 
     // =========================================================================
