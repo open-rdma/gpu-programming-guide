@@ -1,5 +1,5 @@
 /*
- * 第15章 代码示例：编程式依赖启动（PDL）【修正版】
+ * 第15章 代码示例：编程式依赖启动（PDL）
  * 硬件要求：CC 9.0+ (Hopper H100+)
  * 编译：nvcc -arch=sm_90 pdl_example.cu -o pdl_example
  */
