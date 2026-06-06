@@ -1,6 +1,6 @@
 # 第16章 Cooperative Groups扩展：Cluster Group与高级集合操作
 
-<strong>硬件要求</strong>：CC 7.0+（Basic Cooperative Groups），CC 9.0+（Cluster Group），CC 8.0+（异步Reduce/Scan硬件加速）
+<strong>硬件要求</strong>：CC 3.5+（Basic Cooperative Groups），CC 9.0+（Cluster Group），CC 8.0+（异步Reduce/Scan硬件加速）
 
 > "Cooperative Groups is an extension to the CUDA programming model, introduced in CUDA 9, for organizing groups of communicating threads. Cooperative Groups allows developers to express the granularity at which threads are communicating, helping them to express richer, more efficient parallel decompositions."
 > -- CUDA C++ Programming Guide 13.0
@@ -70,7 +70,7 @@ CG自CUDA 11.5以来经历了显著扩展。以下是各版本的关键新增功
 
 ### 16.2.3 CUDA 12.2
 
-- 为 `grid_group` 和 `thread_block` 新增 `barrier_arrive()` / `barrier_wait()` 成员函数
+- 为 `grid_group` 新增 `barrier_arrive()` / `barrier_wait()` 成员函数
 
 ### 16.2.4 CUDA 13.0
 
@@ -81,12 +81,14 @@ CG自CUDA 11.5以来经历了显著扩展。以下是各版本的关键新增功
 CG的组类型形成了一个层次结构：
 
 ```
-coalesced_group (warp中活跃线程)
-    └── thread_block_tile<N> (编译期大小的tile)
-          └── 派生自 thread_block
-thread_block (线程块中所有线程)
-    └── cluster_group (集群中所有线程/块) [CC 9.0+]
-          └── grid_group (网格中所有线程) [需要cooperative launch]
+隐式组（由启动配置确定）
+├── grid_group       整个网格的所有线程 [需要协作启动]
+├── cluster_group    单个集群的所有线程 [CC 9.0+]
+└── thread_block     单个线程块的所有线程
+
+显式组（通过划分操作创建）
+├── thread_block_tile<N>  从thread_block划分的编译期固定大小tile
+└── coalesced_group       从任意组划分的活跃线程集合
 ```
 
 ---
@@ -123,18 +125,18 @@ __global__ void clusterKernel() {
 
 | 成员函数 | 返回类型 | 说明 |
 |---------|---------|------|
-| `sync()` | `static void` | 集群级别同步，等价于 `barrier_wait(barrier_arrive())` |
+| `sync()` | ` void` | 集群级别同步，等价于 `barrier_wait(barrier_arrive())` |
 | `barrier_arrive()` | `cluster_group::arrival_token` | 到达集群屏障，返回token |
-| `barrier_wait(token&&)` | `static void` | 等待集群屏障，接收arrive返回的token |
-| `thread_rank()` | `static unsigned int` | 调用线程在集群中的排名 [0, num_threads) |
-| `block_rank()` | `static unsigned int` | 调用线程所在块在集群中的排名 [0, num_blocks) |
-| `num_threads()` | `static unsigned int` | 集群中的总线程数 |
-| `num_blocks()` | `static unsigned int` | 集群中的总线程块数 |
-| `dim_threads()` | `static dim3` | 集群的线程维度 |
-| `dim_blocks()` | `static dim3` | 集群的线程块维度 |
-| `block_index()` | `static dim3` | 调用块在集群中的3D索引 |
-| `query_shared_rank(const void *addr)` | `static unsigned int` | 查询共享内存地址属于哪个块 |
-| `map_shared_rank(T *addr, int rank)` | `static T*` | 获取集群中另一个块的共享内存地址映射 |
+| `barrier_wait(token&&)` | ` void` | 等待集群屏障，接收arrive返回的token |
+| `thread_rank()` | ` unsigned int` | 调用线程在集群中的排名 [0, num_threads) |
+| `block_rank()` | ` unsigned int` | 调用线程所在块在集群中的排名 [0, num_blocks) |
+| `num_threads()` | ` unsigned int` | 集群中的总线程数 |
+| `num_blocks()` | ` unsigned int` | 集群中的总线程块数 |
+| `dim_threads()` | ` dim3` | 集群的线程维度 |
+| `dim_blocks()` | ` dim3` | 集群的线程块维度 |
+| `block_index()` | ` dim3` | 调用块在集群中的3D索引 |
+| `query_shared_rank(const void *addr)` | ` unsigned int` | 查询共享内存地址属于哪个块 |
+| `map_shared_rank(T *addr, int rank)` | ` T*` | 获取集群中另一个块的共享内存地址映射 |
 
 ### 16.3.3 分布式共享内存操作
 
@@ -158,7 +160,7 @@ __global__ void dsmKernel() {
 
 #### map_shared_rank
 
-将当前块中的共享内存地址映射为集群中另一个块的对应地址，使得可以直接读写远程块的共享内存：
+将当前块中的共享内存地址映射为集群中另一个块的对应地址，使得可以直接读写远程块的共享内存，但只能在同一个集群内有效，且只能用于访问目标块的共享内存，目标块必须与当前块属于同一集群：
 
 ```cuda
 __global__ void dsmAccessKernel() {
@@ -328,11 +330,7 @@ __global__ void asyncReduceKernel(float *input, float *output, int n) {
     s_data[threadIdx.x] = threadVal;
 
     // 发起异步reduce——不阻塞
-    cg::async_reduce(block, barrier,
-                     s_data,         // 目标（共享内存）
-                     s_data,         // 源（共享内存）
-                     block.size(),   // 元素数量
-                     cg::plus<float>());
+    cg::async_reduce(block, barrier, s_data, s_data, block.size(), cg::plus<float>());
 
     // 在等待reduce完成的同时，执行其他独立计算
     float otherWork = doSomeIndependentCalculation(threadIdx.x);
@@ -364,11 +362,7 @@ __global__ void asyncScanKernel(int *input, int *output, int n) {
     s_data[threadIdx.x] = input[threadIdx.x];
 
     // 异步exclusive_scan
-    cg::async_exclusive_scan(block, barrier,
-                             s_data,
-                             s_data,
-                             block.size(),
-                             cg::plus<int>());
+    async_exclusive_scan(group, dst, src, N, op, barrier)
 
     // 在scan完成前执行其他工作
     preprocessData(s_data, threadIdx.x);
@@ -612,9 +606,8 @@ __global__ void distributedHistogram(
     cg::cluster_group cluster = cg::this_cluster();
     unsigned int numBlocks = cluster.num_blocks();
 
-    // 每个块分配一部分共享内存用于直方图
+    // 每个块分配共享内存用于本地直方图
     __shared__ unsigned int localBins[NUM_BINS];
-    extern __shared__ unsigned int sharedBins[];
 
     // 初始化本地共享内存
     for (int i = threadIdx.x; i < NUM_BINS; i += blockDim.x) {
@@ -622,8 +615,7 @@ __global__ void distributedHistogram(
     }
     cluster.sync();
 
-    // 分布式全局索引分配
-    // 每个块处理一部分数据
+    // 分布式数据分配：每个块处理一部分数据
     unsigned int itemsPerBlock = N / numBlocks;
     unsigned int blockStart = cluster.block_rank() * itemsPerBlock;
     unsigned int blockEnd = (cluster.block_rank() == numBlocks - 1) ?
@@ -636,8 +628,15 @@ __global__ void distributedHistogram(
     }
     cluster.sync();
 
+    // 提前获取集群中所有块的共享内存地址映射（基于相同偏移量）
+    // 注意：Hopper 架构集群最大支持 16 个块，这里用 32 留余量
+    unsigned int* remoteBinsPtrs[32];
+    for (unsigned int b = 0; b < numBlocks; b++) {
+        remoteBinsPtrs[b] = cluster.map_shared_rank(localBins, b);
+    }
+
     // 阶段2：使用分布式共享内存进行全局合并
-    // 每个块负责合并一定数量的bin
+    // 每个块负责合并一定数量的 bin
     unsigned int binsPerBlock = NUM_BINS / numBlocks;
     unsigned int myBinStart = cluster.block_rank() * binsPerBlock;
     unsigned int myBinEnd = myBinStart + binsPerBlock;
@@ -645,18 +644,12 @@ __global__ void distributedHistogram(
     for (unsigned int bin = myBinStart + threadIdx.x;
          bin < myBinEnd; bin += blockDim.x) {
         unsigned int total = 0;
-
-        // 从集群中所有块收集该bin的计数
+        // 从集群中所有块收集该 bin 的计数
         for (unsigned int b = 0; b < numBlocks; b++) {
-            unsigned int *remoteBins =
-                cluster.map_shared_rank(localBins, b);
-            total += remoteBins[bin];
+            total += remoteBinsPtrs[b][bin];
         }
-
         // 写入全局内存
-        if (threadIdx.x < binsPerBlock) {
-            globalHistogram[bin] = total;
-        }
+        globalHistogram[bin] = total;
     }
 }
 ```
