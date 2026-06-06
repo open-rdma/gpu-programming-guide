@@ -1,11 +1,13 @@
 /*
- * 第15章 代码示例：编程式依赖启动（PDL）
+ * 第15章 代码示例：编程式依赖启动（PDL）【修正版】
  * 硬件要求：CC 9.0+ (Hopper H100+)
  * 编译：nvcc -arch=sm_90 pdl_example.cu -o pdl_example
  */
 
 #include <cuda_runtime.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
 
 #define N 1024
 #define BLOCK_SIZE 256
@@ -13,49 +15,43 @@
 __global__ void primary_kernel(float *data, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
-        // 初始工作：初始化数据
         data[idx] = (float)idx;
-    }
-
-    // 触发secondary kernel的启动
-    // 所有线程块都需要调用此函数
-    cudaTriggerProgrammaticLaunchCompletion();
-
-    // 与secondary kernel并发执行的工作
-    // （此处为示例，实际中可能是更复杂的计算）
-    if (idx < n) {
         data[idx] *= 2.0f;
+    }
+    // 【修正1】确保所有线程完成计算，且每个线程块仅调用一次
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        cudaTriggerProgrammaticLaunchCompletion();
     }
 }
 
 __global__ void secondary_kernel(float *data, float *result, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    // 独立工作——不依赖primary kernel的结果
     if (idx < n) {
+        // 不依赖primary的工作可提前完成
         result[idx] = 0.0f;
     }
-
-    // 等到primary kernel的结果对当前kernel可见
+    // 等待primary grid完全结束，数据可见
     cudaGridDependencySynchronize();
-
-    // 依赖的工作——使用primary kernel产生的结果
     if (idx < n) {
+        // 依赖primary数据的操作
         result[idx] = data[idx] + 1.0f;
     }
 }
 
+#define CHECK_CUDA(err) do{auto e=err;if(e!=cudaSuccess){printf("CUDA ERR:%s at line %d\n",cudaGetErrorString(e),__LINE__);exit(1);}}while(0)
+
 int main() {
     float *d_data, *d_result;
-    cudaMalloc(&d_data, N * sizeof(float));
-    cudaMalloc(&d_result, N * sizeof(float));
+    CHECK_CUDA(cudaMalloc(&d_data, N * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_result, N * sizeof(float)));
 
     cudaStream_t stream;
-    cudaStreamCreate(&stream);
+    CHECK_CUDA(cudaStreamCreate(&stream));
 
     int gridDim = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
-    // 配置secondary kernel的启动属性
+    // 开启PDL属性
     cudaLaunchAttribute attribute[1];
     attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
     attribute[0].val.programmaticStreamSerializationAllowed = 1;
@@ -68,19 +64,19 @@ int main() {
     configSecondary.attrs = attribute;
     configSecondary.numAttrs = 1;
 
-    // 在同一stream中启动两个kernel
+    // 提交primary kernel
     primary_kernel<<<gridDim, BLOCK_SIZE, 0, stream>>>(d_data, N);
+    CHECK_CUDA(cudaGetLastError());
 
-    // secondary kernel通过extensible launch API启动
-    // 参数需要通过指针数组传递
+    // 【修正2】参数数组必须传递参数变量的地址，即指针的地址
     void *args[] = {&d_data, &d_result, &N};
-    cudaLaunchKernelEx(&configSecondary, secondary_kernel);
+    CHECK_CUDA(cudaLaunchKernelEx(&configSecondary, secondary_kernel, args));
 
-    cudaStreamSynchronize(stream);
+    CHECK_CUDA(cudaStreamSynchronize(stream));
 
-    // 验证结果
+    // 结果验证
     float *h_result = (float*)malloc(N * sizeof(float));
-    cudaMemcpy(h_result, d_result, N * sizeof(float), cudaMemcpyDeviceToHost);
+    CHECK_CUDA(cudaMemcpy(h_result, d_result, N * sizeof(float), cudaMemcpyDeviceToHost));
 
     int errors = 0;
     for (int i = 0; i < N; i++) {
@@ -97,9 +93,8 @@ int main() {
     }
 
     free(h_result);
-    cudaFree(d_data);
-    cudaFree(d_result);
-    cudaStreamDestroy(stream);
-
+    CHECK_CUDA(cudaFree(d_data));
+    CHECK_CUDA(cudaFree(d_result));
+    CHECK_CUDA(cudaStreamDestroy(stream));
     return errors;
 }
