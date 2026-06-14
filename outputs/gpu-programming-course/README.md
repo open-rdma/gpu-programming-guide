@@ -77,20 +77,20 @@ nvcc -o vector_add vector_add.cu
 
 课程配套的在线评测系统位于 `outputs/eval_system/`，支持代码提交、自动编译、NCU性能分析和报告下载。详见该目录下的 `design.md`。
 
-## 项目结构
+## 项目主要结构
 
 ```
-gpu-programming-course/
-├── README.md                    # 本文件
-├── docs/                        # 课程文档
-│   ├── _sidebar.md              # 侧边栏导航
-│   ├── 前言.md                  # 前言
-│   ├── images/                  # 图片资源
-│   ├── chapter1/ ~ chapter11/   # 基础篇章节
-│   └── advanced-chapter1/ ~ 6/  # 进阶篇章节
-├── code/                        # 随章代码
-├── Extra-Chapter/               # 补充资料与参考答案
-└── outputs/                     # 规划文档与评测系统
+gpu-programming-guide/
+├── cold-start/                 # 冷启动知识库与参考资料
+├── outputs/                    # 课程产出与规划文档
+│   ├── eval_system/            # 在线评测系统设计与实现
+│   └── gpu-programming-course/ # 课程主体内容
+│       ├── code/               # 各章节 CUDA 示例代码
+│       ├── docs/               # 各章节课程文档
+│       │   ├── images/         # 文档图片资源
+│       │   └── README.md       # 文档目录说明
+│       └── syllabus/           # 课程大纲与教学计划
+└── README.md                   # 项目说明文档
 ```
 
 ## 贡献指南
