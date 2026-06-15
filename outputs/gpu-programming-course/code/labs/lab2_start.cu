@@ -13,9 +13,10 @@
  * 编译: nvcc lab2_start.cu -o lab2_start -lcublas
  * 运行: ./lab2_start
  */
-
-#include "sgemm_common.h"
-#include <cublas_v2.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <cuda_runtime.h>
 
 // ============================================================================
 // TODO: 将实验1的 2D kernel 改写为 1D kernel，实现合并访问
@@ -72,10 +73,10 @@ int main() {
   CUDA_CHECK(cudaMemcpy(d_C, C, M * N * sizeof(float), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_C_ref, C_ref, M * N * sizeof(float), cudaMemcpyHostToDevice));
 
-  // cuBLAS reference
-  cublasHandle_t handle;
-  cublasCreate(&handle);
-  runCublasSgemm(handle, M, N, K, alpha, d_A, d_B, beta, d_C_ref);
+  // // cuBLAS reference（可选）
+  // cublasHandle_t handle;
+  // cublasCreate(&handle);
+  // runCublasSgemm(handle, M, N, K, alpha, d_A, d_B, beta, d_C_ref);
 
   // TODO: 配置 1D block 启动参数
   // dim3 gridDim(CEIL_DIV(M, 32), CEIL_DIV(N, 32));
@@ -84,7 +85,7 @@ int main() {
 
   printf("\n请在代码中完成 TODO 部分的实现。\n");
 
-  cublasDestroy(handle);
+  // cublasDestroy(handle);
   cudaFree(d_A); cudaFree(d_B); cudaFree(d_C); cudaFree(d_C_ref);
   free(A); free(B); free(C); free(C_ref);
   return 0;

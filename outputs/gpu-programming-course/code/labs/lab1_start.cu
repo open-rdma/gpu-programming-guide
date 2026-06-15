@@ -11,8 +11,34 @@
  * 运行: ./lab1_start
  */
 
-#include "sgemm_common.h"
-#include <cublas_v2.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <cuda_runtime.h>
+
+// ========== 宏定义 ==========
+#define CEIL_DIV(a, b)  (((a) + (b) - 1) / (b))
+
+#define CUDA_CHECK(call) do { \
+    cudaError_t err = call; \
+    if (err != cudaSuccess) { \
+        fprintf(stderr, "CUDA Error [%s:%d]: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+        exit(EXIT_FAILURE); \
+    } \
+} while(0)
+
+void randomize_matrix(float *mat, int size) {
+    for (int i = 0; i < size; ++i) {
+        mat[i] = (float)rand() / RAND_MAX;
+    }
+}
+
+void zero_init_matrix(float *mat, int size) {
+    for (int i = 0; i < size; ++i) {
+        mat[i] = 0.0f;
+    }
+}
+// ==============================================================
 
 // ============================================================================
 // TODO: 在此处编写你的 sgemm_naive kernel
@@ -27,8 +53,6 @@
 // __global__ void sgemm_naive(...) { ... }
 
 int main() {
-  // 显示 GPU 信息
-  CudaDeviceInfo();
 
   // 矩阵参数
   const int M = 4096;
@@ -67,11 +91,11 @@ int main() {
   CUDA_CHECK(cudaMemcpy(d_C_ref, C_ref, M * N * sizeof(float), cudaMemcpyHostToDevice));
 
   // ========================================================================
-  // 使用 cuBLAS 获取参考结果
+  // 使用 cuBLAS 获取参考结果（··可选··）
   // ========================================================================
-  cublasHandle_t handle;
-  cublasCreate(&handle);
-  runCublasSgemm(handle, M, N, K, alpha, d_A, d_B, beta, d_C_ref);
+  // cublasHandle_t handle;
+  // cublasCreate(&handle);
+  // runCublasSgemm(handle, M, N, K, alpha, d_A, d_B, beta, d_C_ref);
 
   // ========================================================================
   // TODO: 配置 kernel 启动参数并运行你的 kernel
@@ -88,8 +112,8 @@ int main() {
 
   printf("\n请在代码中完成 TODO 部分的实现，然后重新编译运行。\n");
 
-  // 清理
-  cublasDestroy(handle);
+  // 清理：删掉未定义的 cublasDestroy(handle)
+  // cublasDestroy(handle);
   cudaFree(d_A);
   cudaFree(d_B);
   cudaFree(d_C);
