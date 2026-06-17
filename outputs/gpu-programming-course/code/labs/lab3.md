@@ -7,7 +7,8 @@
 ## 一、Summary（摘要）视图
 
 <!-- ✅ 在此处插入 Image 1（Summary 标签页截图） -->
-![图1-NCU-Summary视图](image1.png)
+![图一](image-6.png)
+[图1-NCU-Summary视图](image1.png)
 
 **1.1 顶部元数据**
 
@@ -39,7 +40,8 @@
 ## 二、Details 视图 —— GPU Speed of Light & Launch Statistics
 
 <!-- ✅ 在此处插入 Image 2（Details 标签页上半部分截图） -->
-![图2-NCU-Details-SpeedOfLight](image2.png)
+![alt text](image-7.png)
+[图2-NCU-Details-SpeedOfLight](image2.png)
 
 **2.1 GPU Speed of Light Throughput（光速吞吐量）**
 
@@ -91,7 +93,8 @@ NCU 给出了**High Throughput（高吞吐）**提示：
 ## 三、Details 视图 —— Occupancy & 工作负载分布
 
 <!-- ✅ 在此处插入 Image 3（Details 标签页下半部分截图） -->
-![图3-NCU-Details-Occupancy](image3.png)
+![alt text](image-8.png)
+[图3-NCU-Details-Occupancy](image3.png)
 
 **3.1 Occupancy（占用率）**
 
