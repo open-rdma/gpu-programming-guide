@@ -80,7 +80,7 @@ CUDA Programming Guide 原表（Table 8）：
 | Swizzle | 不支持 | 硬件支持（4种模式） |
 | 多播 | 不支持 | 支持 Cluster 多播 |
 | 拷贝大小 | 4/8/16 字节对齐 | 16 字节对齐 |
-| 共享内存对齐 | 128 字节 | 128 字节（多维） |
+| 共享内存对齐 | 16 字节(最大) | 128 字节（多维） |
 
 ## 14.3 一维 TMA 拷贝
 
@@ -239,6 +239,14 @@ CUresult res = cuTensorMapEncodeTiled(
     CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
     CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
 );
+
+//检查返回值
+if (res != CUDA_SUCCESS) {
+    const char* errStr = "unknown";
+    cuGetErrorString(res, &errStr);
+    fprintf(stderr, "cuTensorMapEncodeTiled failed with error %d: %s\n", res, errStr);
+    exit(EXIT_FAILURE);
+}
 ```
 
 `cuTensorMapEncodeTiled` 的参数含义：
@@ -365,10 +373,6 @@ __global__ void kernel(const __grid_constant__ CUtensorMap tensor_map,
     cde::cp_async_bulk_wait_group_read&lt;0&gt;();
   }
 
-  // 销毁 barrier，释放共享内存
-  if (threadIdx.x == 0) {
-    (&bar)-&gt;~barrier();
-  }
 }
 ```
 
@@ -846,7 +850,7 @@ __global__ void tma_pipeline_kernel(
 }
 ```
 
-## 14.9 TMA vs 手动 memcpy_async 性能对比
+## 14.12 TMA vs 手动 memcpy_async 性能对比
 
 | 维度 | 手动 memcpy_async | TMA |
 |------|-----------------|-----|
@@ -861,29 +865,29 @@ __global__ void tma_pipeline_kernel(
 
 对于简单的 1D 连续数据拷贝，TMA 和 `memcpy_async` 性能接近。但当涉及多维分块、不规则步长、或需要消除 bank conflict 的场景时，TMA 的优势就非常显著——因为它将复杂的地址计算和布局转换卸载到了专用硬件。
 
-## 14.10 TMA 的限制与兼容性
+## 14.13 TMA 的限制与兼容性
 
-### 14.10.1 硬件限制
+### 14.13.1 硬件限制
 
 1. <strong>CC 9.0+ 独占</strong>：TMA 是 Hopper 架构的特性，无法在旧硬件上使用；
 2. <strong>共享内存对齐严格</strong>：多维 TMA 要求共享内存 128 字节对齐，Swizzle 模式下要求 1024 字节对齐；
 3. <strong>异步性不保证</strong>：CUDA Programming Guide 明确指出 TMA 传输的异步性取决于硬件实现；
 4. <strong>多播性能</strong>：`sm_90a` 目标上优化最佳，其他目标可能性能显著下降。
 
-### 14.10.2 编程限制
+### 14.13.2 编程限制
 
 1. Tensor Map 的创建需要 Driver API（`cuTensorMapEncodeTiled`），不能完全在 Runtime API 中完成；
 2. 设备端编码依赖 `tensormap.replace` PTX 指令，API 封装尚在 experimental 阶段；
 3. 调试困难：TMA 是硬件黑盒，无法像手动 `memcpy_async` 那样直接跟踪数据流；
 4. 编译器要求：需要 `nvcc -arch=sm_90` 或更高。
 
-### 14.10.3 兼容性
+### 14.13.3 兼容性
 
 - TMA 代码在 CC < 9.0 的设备上<strong>无法运行</strong>；
 - 可以在编译时检查：
 
 ```cuda
-#if defined(__CUDA_MINIMUM_ARCH__) && __CUDA_MINIMUM_ARCH__ < 900
+#if __CUDA_ARCH__ < 900
 static_assert(false,
     "Device code compiled with older architectures incompatible with TMA.");
 #endif
@@ -900,15 +904,15 @@ static_assert(false,
     for (int row = 0; row < SMEM_HEIGHT; row++) {
         cuda::memcpy_async(block,
             &smem[row * SMEM_WIDTH],
-            &global[global_y + row) * GMEM_WIDTH + global_x],
+            &global[(global_y + row) * GMEM_WIDTH + global_x],
             sizeof(float) * SMEM_WIDTH, pipe);
     }
 #endif
 ```
 
-## 14.11 TMA 实际应用场景
+## 14.14 TMA 实际应用场景
 
-### 14.11.1 深度学习卷积
+### 14.14.1 深度学习卷积
 
 在深度学习框架中，卷积操作的 im2col 或直接卷积实现是 TMA 的典型应用：
 
@@ -936,7 +940,7 @@ __global__ void conv3d_tma(
 }
 ```
 
-### 14.11.2 矩阵乘法分块
+### 14.14.2 矩阵乘法分块
 
 ```cuda
 __global__ void gemm_tma(
@@ -982,7 +986,7 @@ __global__ void gemm_tma(
 }
 ```
 
-### 14.11.3 图像处理中的边界处理
+### 14.14.3 图像处理中的边界处理
 
 利用 TMA 的越界零填充机制，可以简化图像处理中的边界处理：
 
@@ -1003,9 +1007,9 @@ __global__ void convolution_with_padding(
 }
 ```
 
-## 14.12 TMA 性能调优指南
+## 14.15 TMA 性能调优指南
 
-### 14.12.1 拷贝大小的选择
+### 14.15.1 拷贝大小的选择
 
 TMA 的最佳拷贝大小取决于多个因素：
 
@@ -1019,7 +1023,7 @@ TMA 的最佳拷贝大小取决于多个因素：
 
 > "In general, issuing as few bulk copies with as big a size as possible results in the best performance."
 
-### 14.12.2 对齐的严格性
+### 14.15.2 对齐的严格性
 
 下表总结了不同 TMA 模式的对齐要求严重程度：
 
@@ -1030,7 +1034,7 @@ TMA 的最佳拷贝大小取决于多个因素：
 | 步长 16B 倍数 | <strong>硬错误</strong>（未定义行为） |
 | Swizzle 共享内存 1024B 对齐 | <strong>硬错误</strong>（128B Swizzle 模式） |
 
-### 14.12.3 使用 Nsight Compute 分析 TMA 性能
+### 14.15.3 使用 Nsight Compute 分析 TMA 性能
 
 NVIDIA Nsight Compute 提供 TMA 相关指标：
 
@@ -1040,7 +1044,7 @@ NVIDIA Nsight Compute 提供 TMA 相关指标：
 
 通过这些指标可以量化 TMA 实际节省的指令数和带宽。
 
-## 14.13 TMA 与手动 memcpy_async 的迁移指南
+## 14.16 TMA 与手动 memcpy_async 的迁移指南
 
 如果你的代码目前使用 `cuda::memcpy_async` 进行多维分块拷贝，迁移到 TMA 的步骤如下：
 
@@ -1058,7 +1062,7 @@ NVIDIA Nsight Compute 提供 TMA 相关指标：
 
 
 
-## 14.11 动手体验：完整的 2D TMA 分块处理程序
+## 14.17 动手体验：完整的 2D TMA 分块处理程序
 
 下面是一个完整的、概念展示性的 2D TMA 程序（注意：实际运行需要 H100 硬件和 Driver API 支持）：
 
@@ -1121,6 +1125,14 @@ CUtensorMap create_2d_tensor_map(int *d_data) {
            CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
            CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
            CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+
+     if (res != CUDA_SUCCESS) {
+        const char* errStr = "unknown";
+        cuGetErrorString(res, &errStr);
+        fprintf(stderr, "cuTensorMapEncodeTiled failed with error %d: %s\n", res, errStr);
+        exit(EXIT_FAILURE);
+    }
+      
     return tmap;
 }
 
@@ -1150,9 +1162,9 @@ int main() {
 }
 ```
 
-## 14.14 常见问题与故障排除
+## 14.18 常见问题与故障排除
 
-### 14.14.1 TMA 传输返回错误或崩溃
+### 14.18.1 TMA 传输返回错误或崩溃
 
 <strong>常见原因</strong>：
 1. 全局内存地址未 16 字节对齐；
@@ -1165,7 +1177,7 @@ int main() {
 - 共享内存使用 `__shared__ alignas(128)` 或 `alignas(1024)`（Swizzle）；
 - 使用 `static_assert` 在编译时检查计算能力。
 
-### 14.14.2 Tensor Map 创建失败
+### 14.18.2 Tensor Map 创建失败
 
 <strong>cuTensorMapEncodeTiled 返回错误</strong>：
 
@@ -1174,7 +1186,7 @@ int main() {
 2. `stride` 不是 16 字节的倍数；
 3. Driver API 版本不匹配（需要 CUDA 12.0+ 驱动）。
 
-### 14.14.3 Swizzle 索引计算错误
+### 14.18.3 Swizzle 索引计算错误
 
 <strong>症状</strong>：使用 Swizzle 后数据正确但位置错误。
 
@@ -1183,7 +1195,7 @@ int main() {
 2. 正确计算偏移量：`offset = (reinterpret_cast<uintptr_t>(smem_ptr)/128)%8`；
 3. 正确使用索引关系：`smem[y][((y+offset)%8)^x]`。
 
-### 14.14.4 设备端编码的 fence 问题
+### 14.18.4 设备端编码的 fence 问题
 
 <strong>症状</strong>：修改后的 Tensor Map 不可见或使用了旧值。
 
@@ -1192,7 +1204,7 @@ int main() {
 - 消费 kernel 中使用 `fence_proxy_tensormap_generic` 的 acquire fence；
 - 确保编码和消费在不同的 kernel launch 中（或在同一 launch 中使用适当的内存顺序）。
 
-### 14.14.5 TMA 多播性能不佳
+### 14.18.5 TMA 多播性能不佳
 
 <strong>可能原因</strong>：
 1. 未使用 `sm_90a` 目标编译；
@@ -1204,7 +1216,7 @@ int main() {
 - 将多播限制在较小的 cluster（2-4 个块）；
 - 评估是否真的需要多播——有时单块加载 + DSM 分发更高效。
 
-## 14.15 性能基准参考
+## 14.19 性能基准参考
 
 以下是在 H100 (CC 9.0) 上对不同数据搬运方案的性能对比（2D 256x256 数组分块，tile 16x16）：
 
@@ -1222,7 +1234,7 @@ int main() {
 2. 二维 TMA tensor copy 比一维快约 33%，因为一次指令处理了整个 tile；
 3. Swizzle 模式在转置场景提供了额外 33% 的加速，来自消除 bank conflict。
 
-## 14.16 迁移指南：从 memcpy_async 到 TMA
+## 14.20 迁移指南：从 memcpy_async 到 TMA
 
 如果你的代码目前使用 `cuda::memcpy_async` 进行多维分块拷贝，以下是迁移到 TMA 的步骤：
 
@@ -1281,7 +1293,7 @@ __syncthreads();
 #endif
 ```
 
-## 14.17 本章小结
+## 14.21 本章小结
 
 本章深入介绍了 NVIDIA Hopper 架构的 Tensor Memory Accelerator (TMA)，要点总结如下：
 
@@ -1303,7 +1315,7 @@ __syncthreads();
 
 TMA 代表了 GPU 编程从"软件管理数据搬运"到"硬件加速数据搬运"的重要演进。对于矩阵乘法、卷积、转置等核心计算模式，TMA 能够显著简化代码并提升性能。
 
-## 14.13 习题
+## 14.22 习题
 
 1. 对比 TMA 的 bulk-asynchronous copy 和上一章的 `cuda::memcpy_async`，说明在什么场景下 TMA 有显著优势，什么场景下两者性能接近。
 
@@ -1317,7 +1329,7 @@ TMA 代表了 GPU 编程从"软件管理数据搬运"到"硬件加速数据搬�
 
 6. 讨论设备端 Tensor Map 编码相比主机端创建的优势和局限性。什么场景下必须使用设备端编码？
 
-## 14.14 参考文献
+## 14.23 参考文献
 
 1. CUDA C++ Programming Guide 13.0, Section 10.29 "Asynchronous Data Copies using the Tensor Memory Accelerator (TMA)"
 2. CUDA C++ Programming Guide 13.0, Section 10.30 "Encoding a Tensor Map on Device"

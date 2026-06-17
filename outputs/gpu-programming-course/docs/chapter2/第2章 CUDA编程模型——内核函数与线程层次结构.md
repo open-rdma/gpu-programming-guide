@@ -111,7 +111,7 @@ float result = add(3.0f, 4.0f);
 // add() 函数体执行一次，result = 7.0f
 ```
 
-<strong>CUDA内核启动</strong>：函数体被<strong>N个线程</strong>各自独立执行。但所有线程接收<strong>相同的参数</strong>。区分不同线程"应该做什么"的唯一方式是使用内置变量（`threadIdx`等）。
+<strong>CUDA内核启动</strong>：函数体被<strong>N个线程</strong>各自独立执行。但所有线程接收<strong>相同的参数</strong>。区分不同线程"应该做什么"的最常用的方式是使用内置变量（`threadIdx`等）。
 
 ```cuda
 __global__ void addVectors(float* A, float* B, float* C, int N) {
@@ -163,7 +163,7 @@ int main()
 CUDA的线程层次结构是其可扩展性的基石。线程被组织为清晰的三级层次：
 
 1. <strong>线程（Thread）</strong>：最细粒度的执行单元。每个线程有自己的寄存器和程序计数器。
-2. <strong>线程块（Thread Block）</strong>：一组可以彼此同步和共享数据的线程。线程块内的线程通过共享内存和`__syncthreads()`协作。
+2. <strong>线程块（Thread Block）</strong>：一组可以彼此同步和共享数据的线程。线程块内的线程通过共享内存和`__syncthreads()`协作；不同块间不同步，不能访问彼此共享内存。
 3. <strong>网格（Grid）</strong>：组成一个内核启动的所有线程块。同一内核启动只能有一个网格。
 
 CUDA Programming Guide对`threadIdx`使用三维向量的原因做了说明：
@@ -323,7 +323,7 @@ CUDA Programming Guide对`blockIdx`和`blockDim`做了以下描述：
 
 > "Each block within the grid can be identified by a one-dimensional, two-dimensional, or three-dimensional unique index accessible within the kernel through the built-in blockIdx variable. The dimension of the thread block is accessible within the kernel through the built-in blockDim variable."
 >
-> （网格中的每个线程块可以通过内置的`blockIdx`变量在内核中获取其一维、二维或三维的唯一索引。线程块的维度可以通过内置的`blockDim`变量在内核中获取。）
+> （同一网格内的每个线程块，都拥有一个在该网格内唯一的一维、二维或三维索引；该索引可在内核函数内部通过内置变量 `blockIdx`获取。线程块的维度可以通过内置的`blockDim`变量在内核中获取。）
 
 ### 2.3.2 全局索引计算——CUDA编程最核心的公式
 
@@ -508,7 +508,7 @@ int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
 - N = 1000, threadsPerBlock = 256：
   `blocksPerGrid = (1000 + 256 - 1) / 256 = 1255 / 256 = 4` ✓
 - N = 1024, threadsPerBlock = 256：
-  `blocksPerGrid = (1024 + 256 - 1) / 256 = 1279 / 256 = 4` ✓（恰好整除）
+  `blocksPerGrid = (1024 + 256 - 1) / 256 = 1279 / 256 = 4` ✓（恰好整除的时候，该公式依然有效）
 
 <strong>二维情况</strong>：
 
@@ -804,7 +804,7 @@ Done!
 
 ## 2.8 本章小结
 
-在本章中，我们深入探讨了CUDA编程模型的起两个支柱概念——内核函数和线程层次结构。我们的旅程涵盖了以下核心内容：
+在本章中，我们深入探讨了CUDA编程模型的两个支柱概念——内核函数和线程层次结构。我们的旅程涵盖了以下核心内容：
 
 - <strong>内核函数（Kernel）</strong>：使用`__global__`声明说明符定义的函数，由N个CUDA线程并行执行N次。与普通函数"执行一次"的语义完全不同。通过`<<<gridDim, blockDim>>>`执行配置语法指定线程的布局和数量。每个线程通过内置变量获取自己的唯一线程ID，从而知道"我负责处理哪个数据元素"。
 

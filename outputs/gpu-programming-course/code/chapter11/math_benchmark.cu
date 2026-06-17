@@ -110,11 +110,11 @@ __global__ void standardSqrt(const float * __restrict__ a,
     }
 }
 
-__global__ void fastLogExp(const float * __restrict__ a,
-                            float * __restrict__ c, int n) {
+__global__ void fastSqrt(const float * __restrict__ a,
+                          float * __restrict__ c, int n) {
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (idx < n) {
-        c[idx] = __log2f(a[idx]) + exp2f(a[idx] * 0.0001f);
+        c[idx] = __fsqrt_rn(a[idx]);
     }
 }
 
@@ -150,6 +150,33 @@ float benchmark1out(KernelFunc kernel, int n, int gridSize, int blockSize,
     CHECK_CUDA(cudaEventRecord(start, 0));
     for (int i = 0; i < iterations; i++) {
         kernel<<<gridSize, blockSize>>>(d_a, d_c, n);
+    }
+    CHECK_CUDA(cudaEventRecord(stop, 0));
+    CHECK_CUDA(cudaEventSynchronize(stop));
+
+    float ms;
+    CHECK_CUDA(cudaEventElapsedTime(&ms, start, stop));
+
+    CHECK_CUDA(cudaEventDestroy(start));
+    CHECK_CUDA(cudaEventDestroy(stop));
+
+    return ms / iterations;
+}
+
+// 【唯一新增的8行代码】修复除法测试的编译错误
+template<typename KernelFunc>
+float benchmark2in1out(KernelFunc kernel, int n, int gridSize, int blockSize,
+                       int iterations, float *d_a, float *d_b, float *d_c) {
+    cudaEvent_t start, stop;
+    CHECK_CUDA(cudaEventCreate(&start));
+    CHECK_CUDA(cudaEventCreate(&stop));
+
+    kernel<<<gridSize, blockSize>>>(d_a, d_b, d_c, n);
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    CHECK_CUDA(cudaEventRecord(start, 0));
+    for (int i = 0; i < iterations; i++) {
+        kernel<<<gridSize, blockSize>>>(d_a, d_b, d_c, n);
     }
     CHECK_CUDA(cudaEventRecord(stop, 0));
     CHECK_CUDA(cudaEventSynchronize(stop));
@@ -234,8 +261,9 @@ int main() {
     float std_ms, fast_ms;
 
     // === Test 1: Division ===
-    std_ms = benchmark1out(standardDiv, N, gridSize, blockSize, iterations, d_a, d_b, d_c);
-    fast_ms = benchmark1out(fastDiv, N, gridSize, blockSize, iterations, d_a, d_b, d_c);
+    // 【修改1】把benchmark1out改成benchmark2in1out
+    std_ms = benchmark2in1out(standardDiv, N, gridSize, blockSize, iterations, d_a, d_b, d_c);
+    fast_ms = benchmark2in1out(fastDiv, N, gridSize, blockSize, iterations, d_a, d_b, d_c);
     printf("%-40s %10.4f %10s\n", "Standard / (division)", std_ms, "baseline");
     printf("%-40s %10.4f %10.2fx\n", "__fdividef()", fast_ms, std_ms / fast_ms);
 
@@ -257,11 +285,12 @@ int main() {
     printf("%-40s %10.4f %10s\n", "sinf()+cosf() (large args)", std_ms, "baseline");
     printf("%-40s %10.4f %10.2fx\n", "__sinf()+__cosf() (large)", fast_ms, std_ms / fast_ms);
 
-    // === Test 5: Log/Exp intrinsics ===
+    // === Test 5: Sqrt ===
+    // 【修改2】把fastLogExp改成fastSqrt
     std_ms = benchmark1out(standardSqrt, N, gridSize, blockSize, iterations, d_a, d_c);
-    fast_ms = benchmark1out(fastLogExp, N, gridSize, blockSize, iterations, d_a, d_c);
+    fast_ms = benchmark1out(fastSqrt, N, gridSize, blockSize, iterations, d_a, d_c);
     printf("%-40s %10.4f %10s\n", "sqrtf()", std_ms, "baseline");
-    printf("%-40s %10.4f %10.2fx\n", "__log2f()+exp2f()", fast_ms, std_ms / fast_ms);
+    printf("%-40s %10.4f %10.2fx\n", "__fsqrt_rn()", fast_ms, std_ms / fast_ms);
 
     // === Test 6: Integer division vs bit shift ===
     {

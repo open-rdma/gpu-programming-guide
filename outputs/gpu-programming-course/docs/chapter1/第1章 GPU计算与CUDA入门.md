@@ -22,7 +22,7 @@
 - <strong>复杂的控制逻辑</strong>：分支预测（Branch Prediction）、乱序执行（Out-of-Order Execution）、超标量流水线（Superscalar Pipeline）等
 - <strong>大型缓存层次结构</strong>：L1、L2、L3缓存，以减少指令和数据访问的平均延迟
 
-这种设计使得CPU能够高效地执行那些具有复杂控制流、大量分支和不可预测内存访问模式的程序。一个典型的现代CPU核心可以同时执行几十个（通常是2-4个硬件线程）线程。
+这种设计使得CPU能够高效地执行那些具有复杂控制流、大量分支和不可预测内存访问模式的程序。一个典型的现代 CPU 整机可以同时执行几十到上百个线程，每个核心通常支持 2-4 个硬件线程
 
 而<strong>图形处理单元（GPU）</strong>的设计目标截然不同。GPU被设计为能够在同一时刻执行数千个线程，以<strong>最大化整体吞吐量（Throughput）</strong>。为了达成这一目标，GPU将更多晶体管用于<strong>数据计算</strong>（如浮点运算单元ALU），而非数据缓存和流控制。
 
@@ -40,7 +40,7 @@ CUDA Programming Guide对这两种设计理念给出了权威的阐述：
 | <strong>并发线程数</strong> | 几十个（~2-64 per core）       | 数千至数万个                   |
 | <strong>晶体管分配</strong> | 大型缓存 + 复杂控制逻辑        | 大量ALU + 精简控制             |
 | <strong>内存延迟处理</strong> | 大缓存 + 预取                  | 线程切换掩藏延迟               |
-| <strong>时钟频率</strong>    | 更高（~3-5 GHz）               | 相对较低（~1-2 GHz）           |
+| <strong>时钟频率</strong>    | 更高（~3-5 GHz）               | 相对较低（~1-3 GHz）           |
 | <strong>单线程性能</strong>  | 极强                            | 较弱                           |
 | <strong>总吞吐量</strong>    | 中等                            | 极高                           |
 
@@ -69,7 +69,7 @@ GPU采用"晶体管换ALU"策略的一个核心动机，来源于它们在处理
 
 CPU<strong>通过缓存来避免内存延迟</strong>：大容量的L1/L2/L3缓存层次结构使得CPU可以在大部分时间从高速缓存而非慢速主存获取数据，从而避免长时间的DRAM访问等待。
 
-GPU则<strong>通过计算来隐藏内存延迟</strong>：当一个线程发起内存请求并等待数据返回时（这可能需要数百个时钟周期），GPU的调度器可以立即切换到另一个就绪的线程（称为<strong>warp</strong>）继续执行。只要任何时候都有足够的可执行线程，GPU的计算单元就不会空闲。
+GPU则<strong>通过计算来隐藏内存延迟</strong>：当一个线程发起内存请求并等待数据返回时（这可能需要数百个时钟周期），GPU的调度器可以立即切换到另一个就绪的线程束（称为<strong>warp</strong>）继续执行。只要任何时候都有足够的可执行线程，GPU的计算单元就不会空闲。
 
 CUDA Programming Guide对这个关键机制做了精确描述：
 
@@ -612,7 +612,7 @@ __global__ void helloFromGPU()
 ```
 
 - `__global__` 声明该函数是一个<strong>内核函数（Kernel Function）</strong>
-- 内核函数的特点：在<strong>设备（GPU）</strong>上执行，但可以从<strong>主机（CPU）</strong>端调用
+- 内核函数的特点：在<strong>设备（GPU）</strong>上执行，可以从<strong>主机（CPU）</strong>端调用。
 - 同一份内核代码会被N个CUDA线程"同时"并行执行
 
 CUDA还提供了另外两个相关的函数说明符：

@@ -151,6 +151,10 @@ __global__ void secondary_kernel()
 cudaLaunchAttribute attribute[1];
 attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
 attribute[0].val.programmaticStreamSerializationAllowed = 1;
+cudaLaunchConfig_t configSecondary = {};
+configSecondary.gridDim = grid_dim;
+configSecondary.blockDim = block_dim;
+configSecondary.stream = stream;
 configSecondary.attrs = attribute;
 configSecondary.numAttrs = 1;
 
@@ -187,8 +191,8 @@ edgeData.from_port = cudaGraphKernelNodePortProgrammatic;
 | Stream代码（简化） | 对应的图边设置 |
 |---|---|
 | `cudaLaunchAttributeProgrammaticStreamSerialization` 设为 1 | `edgeData.type = cudaGraphDependencyTypeProgrammatic`<br>`edgeData.from_port = cudaGraphKernelNodePortProgrammatic` |
-| `cudaLaunchAttributeProgrammaticEvent` 且 `triggerAtBlockStart = 0` | 同上 |
-| `cudaLaunchAttributeProgrammaticEvent` 且 `triggerAtBlockStart = 1` | `edgeData.type = cudaGraphDependencyTypeProgrammatic`<br>`edgeData.from_port = cudaGraphKernelNodePortLaunchCompletion` |
+| `cudaLaunchAttributeProgrammaticEvent` 且 `triggerAtBlockStart = 0` | `edgeData.type = cudaGraphDependencyTypeProgrammatic`<br> ` edgeData.from_port = cudaGraphKernelNodePortLaunchCompletion `|
+| `cudaLaunchAttributeProgrammaticEvent` 且 `triggerAtBlockStart = 1` | `edgeData.type = cudaGraphDependencyTypeProgrammatic`<br>`edgeData.from_port = cudaGraphKernelNodePortLaunchStart` |
 
 ### 15.3.4 PDL的典型应用场景
 
@@ -235,8 +239,8 @@ cudaGraphInstantiate(&deviceGraphExec, deviceGraph,
 
 ```cuda
 // 方式1：实例化后显式上传
-cudaGraphInstantiate(&deviceGraphExec1, deviceGraph1,
-                     cudaGraphInstantiateFlagDeviceLaunch);
+cudaGraphInstantiateWithFlags(&deviceGraphExec1, deviceGraph1,
+                              cudaGraphInstantiateFlagDeviceLaunch);
 cudaGraphUpload(deviceGraphExec1, stream);
 
 // 方式2：作为实例化的一部分上传
@@ -248,8 +252,8 @@ cudaGraphInstantiateWithParams(&deviceGraphExec2, deviceGraph2,
                                &instantiateParams);
 
 // 方式3：通过主机端首次启动隐式上传
-cudaGraphInstantiate(&deviceGraphExec3, deviceGraph3,
-                     cudaGraphInstantiateFlagDeviceLaunch);
+cudaGraphInstantiateWithFlags(&deviceGraphExec3, deviceGraph3,
+                              cudaGraphInstantiateFlagDeviceLaunch);
 cudaGraphLaunch(deviceGraphExec3, stream);  // 隐式上传
 ```
 
@@ -287,15 +291,14 @@ void graphSetup() {
 
     // 创建、实例化并上传设备图
     create_graph(&g2);
-    cudaGraphInstantiate(&gExec2, g2, cudaGraphInstantiateFlagDeviceLaunch);
+    cudaGraphInstantiateWithFlags(&gExec2, g2, cudaGraphInstantiateFlagDeviceLaunch);
     cudaGraphUpload(gExec2, stream);
 
     // 创建并实例化启动图
     cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
     launchFireAndForgetGraph<<<1, 1, 0, stream>>>(gExec2);
     cudaStreamEndCapture(stream, &g1);
-    cudaGraphInstantiate(&gExec1, g1);
-
+    cudaGraphInstantiateWithFlags(&gExec1, g1, 0);
     // 启动主机图，它将在内部启动设备图
     cudaGraphLaunch(gExec1, stream);
 }
@@ -450,7 +453,7 @@ void graphSetup() {
     cudaGraphCreate(&graph, 0);
 
     cudaGraphConditionalHandle handle;
-    cudaGraphConditionalHandleCreate(&handle, graph);
+    cudaGraphConditionalHandleCreate(&handle, graph，0，0);
 
     // 使用上游kernel设置条件值
     cudaGraphNodeParams params = { cudaGraphNodeTypeKernel };
@@ -476,7 +479,7 @@ void graphSetup() {
     // ...
     cudaGraphAddNode(&node, elseBodyGraph, NULL, NULL, 0, &params);
 
-    cudaGraphInstantiate(&graphExec, graph, NULL, NULL, 0);
+    cudaGraphInstantiateWithFlags(&graphExec, graph, 0);
     cudaGraphLaunch(graphExec, 0);
     cudaDeviceSynchronize();
 
@@ -492,10 +495,14 @@ WHILE节点的body图会在条件为<strong>非零</strong>时持续执行。条
 <div align="center"><img src="../images/advanced-chapter15-figures/conditional-while-node.png" /><p>图 15.13 条件WHILE节点</p></div>
 
 ```cuda
+__device__ int loopCount = 10;
+
 __global__ void loopKernel(cudaGraphConditionalHandle handle)
 {
-    static int count = 10;
-    cudaGraphSetConditional(handle, --count ? 1 : 0);
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        int val = atomicSub(&loopCount, 1);
+        cudaGraphSetConditional(handle, val > 1 ? 1 : 0);
+    }
 }
 
 void graphSetup() {
@@ -504,7 +511,7 @@ void graphSetup() {
     cudaGraphNode_t node;
     void *kernelArgs[1];
 
-    cuGraphCreate(&graph, 0);
+    cudaGraphCreate(&graph, 0);
 
     cudaGraphConditionalHandle handle;
     // 使用默认值1，避免需要上游kernel来设置初始条件
@@ -527,7 +534,7 @@ void graphSetup() {
     kernelArgs[0] = &handle;
     cudaGraphAddNode(&node, bodyGraph, NULL, NULL, 0, &params);
 
-    cudaGraphInstantiate(&graphExec, graph, NULL, NULL, 0);
+    cudaGraphInstantiateWithFlags(&graphExec, graph, 0);
     cudaGraphLaunch(graphExec, 0);
     cudaDeviceSynchronize();
 
@@ -563,7 +570,7 @@ void graphSetup() {
     // 填充最后一个分支
     cudaGraphAddNode(&node, bodyGraphs[4], NULL, NULL, 0, &params);
 
-    cudaGraphInstantiate(&graphExec, graph, NULL, NULL, 0);
+    cudaGraphInstantiateWithFlags(&graphExec, graph, 0);
     cudaGraphLaunch(graphExec, 0);
     cudaDeviceSynchronize();
 }
@@ -621,7 +628,9 @@ params.bytesize = size;
 cudaGraphAddMemAllocNode(&allocNode, graph, NULL, 0, &params);
 
 // 在分配之后使用内存的kernel节点
-nodeParams->kernelParams[0] = params.dptr;
+void* dptr = (void*)(uintptr_t)params.dptr;
+void* kernelArgs[] = { &dptr };
+nodeParams->kernelParams = kernelArgs;
 cudaGraphAddKernelNode(&a, graph, &allocNode, 1, &nodeParams);
 cudaGraphAddKernelNode(&b, graph, &a, 1, &nodeParams);
 cudaGraphAddKernelNode(&c, graph, &a, 1, &nodeParams);
@@ -668,7 +677,7 @@ cudaGraph_t originalGraph, updatedGraph;
 
 // 创建并实例化原始图
 createGraph(&originalGraph);
-cudaGraphInstantiate(&graphExec, originalGraph);
+cudaGraphInstantiateWithFlags(&graphExec, originalGraph, 0);
 
 // 多次启动...
 for (int i = 0; i < numIterations; i++) {

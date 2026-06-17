@@ -81,12 +81,13 @@ CG自CUDA 11.5以来经历了显著扩展。以下是各版本的关键新增功
 CG的组类型形成了一个层次结构：
 
 ```
-coalesced_group (warp中活跃线程)
-    └── thread_block_tile<N> (编译期大小的tile)
-          └── 派生自 thread_block
-thread_block (线程块中所有线程)
-    └── cluster_group (集群中所有线程/块) [CC 9.0+]
-          └── grid_group (网格中所有线程) [需要cooperative launch]
+
+thread_group（抽象基类）
+    ├── coalesced_group（warp中活跃线程）
+    ├── thread_block_tile<N>（编译期大小的tile）
+    ├── thread_block（线程块中所有线程）
+    ├── cluster_group（集群中所有线程/块）[CC 9.0+]
+    └── grid_group（网格中所有线程）[需要cooperative launch]
 ```
 
 ---
@@ -123,14 +124,13 @@ __global__ void clusterKernel() {
 
 | 成员函数 | 返回类型 | 说明 |
 |---------|---------|------|
-| `sync()` | `static void` | 集群级别同步，等价于 `barrier_wait(barrier_arrive())` |
-| `barrier_arrive()` | `cluster_group::arrival_token` | 到达集群屏障，返回token |
-| `barrier_wait(token&&)` | `static void` | 等待集群屏障，接收arrive返回的token |
+| `sync()` | `void` | 集群级别同步，等价于 `barrier_wait(barrier_arrive())` |
+| `barrier_arrive()` | `arrival_token` | 到达集群屏障，返回token |
+| `barrier_wait(token&&)` | `void` | 等待集群屏障，接收arrive返回的token |
 | `thread_rank()` | `static unsigned int` | 调用线程在集群中的排名 [0, num_threads) |
 | `block_rank()` | `static unsigned int` | 调用线程所在块在集群中的排名 [0, num_blocks) |
 | `num_threads()` | `static unsigned int` | 集群中的总线程数 |
 | `num_blocks()` | `static unsigned int` | 集群中的总线程块数 |
-| `dim_threads()` | `static dim3` | 集群的线程维度 |
 | `dim_blocks()` | `static dim3` | 集群的线程块维度 |
 | `block_index()` | `static dim3` | 调用块在集群中的3D索引 |
 | `query_shared_rank(const void *addr)` | `static unsigned int` | 查询共享内存地址属于哪个块 |
@@ -162,14 +162,14 @@ __global__ void dsmKernel() {
 
 ```cuda
 __global__ void dsmAccessKernel() {
-    __shared__ float localCounter;
+    __shared__ unsigned int localCounter;
     cg::cluster_group cluster = cg::this_cluster();
 
     unsigned int myBlockRank = cluster.block_rank();
 
     if (myBlockRank == 0) {
         // 块0：初始化计数器
-        localCounter = 0.0f;
+        localCounter = 0;
     }
     cluster.sync();
 
@@ -180,12 +180,12 @@ __global__ void dsmAccessKernel() {
     );
 
     // 跨块原子加操作
-    atomicAdd(remoteCounter, 1.0f);
+    atomicAdd(remoteCounter, 1);
     cluster.sync();
 
     if (myBlockRank == 0) {
-        printf("Total increments: %f (should be %u)\n",
-               localCounter, cluster.num_blocks());
+        printf("Total increments: %u (should be %u)\n",
+            localCounter, cluster.num_blocks());
     }
 }
 ```
@@ -335,13 +335,10 @@ __global__ void asyncReduceKernel(float *input, float *output, int n) {
                      cg::plus<float>());
 
     // 在等待reduce完成的同时，执行其他独立计算
-    float otherWork = doSomeIndependentCalculation(threadIdx.x);
-
-    // 等待异步操作完成
+    float localResult = doSomeIndependentCalculation(threadIdx.x);
     barrier.arrive_and_wait();
-
     if (block.thread_rank() == 0) {
-        *output = s_data[0] + otherWork;
+        *output = s_data[0];
     }
 }
 ```
@@ -481,6 +478,7 @@ config.blockDim = blockDim;
 config.dynamicSmemBytes = sharedMemSize;
 
 // 必须使用协同启动API
+void *args[] = {&data, &n};
 cudaLaunchCooperativeKernel((void*)gridSyncKernel,
                             config.gridDim, config.blockDim,
                             args, config.dynamicSmemBytes, stream);
@@ -611,10 +609,10 @@ __global__ void distributedHistogram(
     // 获取集群组
     cg::cluster_group cluster = cg::this_cluster();
     unsigned int numBlocks = cluster.num_blocks();
+    unsigned int myBlockRank = cluster.block_rank();
 
-    // 每个块分配一部分共享内存用于直方图
+    // 每个块分配相同大小的共享内存用于直方图
     __shared__ unsigned int localBins[NUM_BINS];
-    extern __shared__ unsigned int sharedBins[];
 
     // 初始化本地共享内存
     for (int i = threadIdx.x; i < NUM_BINS; i += blockDim.x) {
@@ -624,10 +622,9 @@ __global__ void distributedHistogram(
 
     // 分布式全局索引分配
     // 每个块处理一部分数据
-    unsigned int itemsPerBlock = N / numBlocks;
-    unsigned int blockStart = cluster.block_rank() * itemsPerBlock;
-    unsigned int blockEnd = (cluster.block_rank() == numBlocks - 1) ?
-                            N : blockStart + itemsPerBlock;
+    unsigned int itemsPerBlock = (N + numBlocks - 1) / numBlocks;  // 向上取整，避免数据丢失
+    unsigned int blockStart = myBlockRank * itemsPerBlock;
+    unsigned int blockEnd = min(blockStart + itemsPerBlock, (unsigned int)N);
 
     // 阶段1：本地直方图计算
     for (int i = blockStart + threadIdx.x; i < blockEnd; i += blockDim.x) {
@@ -636,11 +633,20 @@ __global__ void distributedHistogram(
     }
     cluster.sync();
 
+    // 预先获取所有块的共享内存地址（避免循环中重复调用map_shared_rank）
+    __shared__ unsigned int *remoteBins[32]; // 集群最大32个块
+    if (threadIdx.x == 0) {
+        for (unsigned int b = 0; b < numBlocks; b++) {
+            remoteBins[b] = cluster.map_shared_rank(localBins, b);
+        }
+    }
+    cluster.sync();
+
     // 阶段2：使用分布式共享内存进行全局合并
     // 每个块负责合并一定数量的bin
-    unsigned int binsPerBlock = NUM_BINS / numBlocks;
-    unsigned int myBinStart = cluster.block_rank() * binsPerBlock;
-    unsigned int myBinEnd = myBinStart + binsPerBlock;
+    unsigned int binsPerBlock = (NUM_BINS + numBlocks - 1) / numBlocks;  // 向上取整
+    unsigned int myBinStart = myBlockRank * binsPerBlock;
+    unsigned int myBinEnd = min(myBinStart + binsPerBlock, (unsigned int)NUM_BINS);
 
     for (unsigned int bin = myBinStart + threadIdx.x;
          bin < myBinEnd; bin += blockDim.x) {
@@ -648,15 +654,11 @@ __global__ void distributedHistogram(
 
         // 从集群中所有块收集该bin的计数
         for (unsigned int b = 0; b < numBlocks; b++) {
-            unsigned int *remoteBins =
-                cluster.map_shared_rank(localBins, b);
-            total += remoteBins[bin];
+            total += remoteBins[b][bin];
         }
 
         // 写入全局内存
-        if (threadIdx.x < binsPerBlock) {
-            globalHistogram[bin] = total;
-        }
+        globalHistogram[bin] = total;
     }
 }
 ```

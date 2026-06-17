@@ -111,16 +111,16 @@ __global__ void divergentKernel(float* data, int N) {
 
 ```cuda
 // 不安全的 warp 内归约（在 Volta+ 上可能产生错误结果）
+// 旧版使用了无掩码的 __shfl_down，依赖 warp 隐式锁步执行
 __device__ int warpReduce(int val) {
-    // 假设 warp 内的线程以锁步方式执行
     for (int offset = 16; offset > 0; offset /= 2) {
-        val += __shfl_down_sync(0xFFFFFFFF, val, offset);
+        val += __shfl_down(val, offset);   // 无掩码，Volta+ 不再可用
     }
     return val;
 }
 ```
+在 Volta 及更新架构中，`__shfl_down` 已被弃用，必须改用` __shfl_down_sync(mask, ...)`，并明确指定参与线程的掩码；如果线程在调用前可能因分支而发散，还需使用 `__syncwarp() `先进行同步，以确保掩码内的线程处于相同执行位置。
 
-在 Volta+ 上，需要使用明确的同步掩码（mask）和 `__syncwarp()` 来确保正确性。
 
 ### 9.3.7 活跃线程与不活跃线程
 
@@ -174,7 +174,7 @@ occupancy = activeWarpsPerSM / maxWarpsPerSM
 
 占用率受以下因素的限制：
 
-1. <strong>每块线程数（Threads per Block）</strong>：块大小必须是 warp 大小（32）的倍数，并且不能超过设备的 `maxThreadsPerBlock` 限制。
+1. <strong>每块线程数（Threads per Block）</strong>：块大小推荐是 warp 大小（32）的倍数，并且不能超过设备的 `maxThreadsPerBlock` 限制。
 
 2. <strong>每线程寄存器数（Registers per Thread）</strong>：核函数使用的寄存器越多，每个 SM 能驻留的 warp 就越少。可以通过 `--maxrregcount` 编译器标志来限制寄存器使用量。
 

@@ -434,10 +434,10 @@ __global__ void single_stage_kernel(int *data, int *result, size_t size) {
         // 消费者：等待数据就绪
         pipeline.consumer_wait();
 
-        // 计算
-        for (int i = threadIdx.x; i < block.size(); i += block.size()) {
-            result[offset + i] = shared[i] * 2;
-        }
+    
+        // 计算：每个线程处理自己对应的元素
+        int i = threadIdx.x;
+        result[offset + i] = shared[i] * 2;
 
         // 释放阶段
         pipeline.consumer_release();
@@ -479,24 +479,30 @@ __global__ void pipeline_kernel(int *data, int *result, size_t size) {
         pipeline.producer_commit();
     }
 
-    // 主循环：消费和生产的流水线重叠
+        // 主循环：消费和生产的流水线重叠
+    // 注意：生产者写入的缓冲区索引必须不同于消费者读取的索引
     for (size_t i = 0; i < num_blocks - (stages - 1); i++) {
-        int stage = i % stages;
+        int producer_stage = (i + stages - 1) % stages;  // 生产者写入的缓冲区
+        int consumer_stage = i % stages;                 // 消费者读取的缓冲区
 
         // 生产下一批数据（异步拷贝）
         pipeline.producer_acquire();
         size_t producer_offset = (i + stages - 1) * block.size();
         if (producer_offset < size) {
-            cuda::memcpy_async(block, buffer[stage],
+            cuda::memcpy_async(block, buffer[producer_stage],
                                data + producer_offset,
                                sizeof(int) * block.size(), pipeline);
         }
         pipeline.producer_commit();
 
+        // 等待生产者提交完成（确保所有线程的提交操作就绪）
+        __syncthreads();
+
         // 消费当前阶段的数据
         pipeline.consumer_wait();
-        for (int j = threadIdx.x; j < block.size(); j += block.size()) {
-            result[i * block.size() + j] = buffer[stage][j] * 2;
+        int j = threadIdx.x;
+        if (j < block.size()) {
+            result[i * block.size() + j] = buffer[consumer_stage][j] * 2;
         }
         pipeline.consumer_release();
     }
@@ -596,18 +602,29 @@ if (any_thread_needs_copy) {
 
 ### 13.7.5 完成函数（Completion Function）
 
-CUDA Programming Guide 10.26.7 节引入了 Completion Function 的概念。这是一个在 barrier 翻转时自动调用的函数：
+cuda::barrier 支持一个可选的<strong>完成函数<strong>，它在屏障每次相位翻转时自动执行。完成函数在最后一个 `arrive() `调用触发翻转时运行，且在所有被阻塞的 `wait() `唤醒之前执行。
+
+完成函数通过模板参数指定，而不是运行时设置：
 
 ```cuda
-// 概念：在 barrier 完成时自动执行的清理或通知操作
-bar.init(block.size());
-bar.set_completion_function([]() {
-    // 当 barrier 翻转时自动执行
-    // 例如：递增共享计数器，触发下一个阶段处理等
-});
+// 定义一个完成函数（可以是一个函数对象）
+struct MyCompletion {
+    __device__ void operator()() {
+        // 当屏障翻转时自动执行，例如：递增共享计数器
+    }
+};
+
+// 使用完成函数作为模板参数
+using barrier_with_completion = cuda::barrier<
+    cuda::thread_scope::thread_scope_block,
+    MyCompletion
+>;
+
+__shared__ barrier_with_completion bar;
+// ... init(&bar, block.size());
 ```
 
-完成函数在 barrier 的最后一个 `arrive()` 调用触发翻转时执行，<strong>在所有被阻塞的线程被唤醒之前</strong>执行。这提供了在同步点自动执行操作的能力。
+完成函数是 CUDA 12.0 及以上版本引入的特性，低版本不支持；完成函数由最后一个到达的线程执行；完成函数中不能调用任何可能阻塞的操作（如` wait()`、`memcpy_async` 等），否则会导致死锁。
 
 ## 13.8 性能测量与分析
 
@@ -899,7 +916,7 @@ int main() {
 
     // 启动 pipeline 核函数
     size_t shared_mem = stages * threads_per_block * sizeof(float);
-    pipeline_demo_kernel&lt;&lt;&lt;1, threads_per_block, shared_mem&gt;&gt;&gt;(
+       pipeline_demo_kernel<<<1, threads_per_block, shared_mem>>>(
         d_input, d_output, N, scale);
 
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -939,7 +956,7 @@ int main() {
 
 在稳态下，Load 和 Compute 完全重叠。阶段数越多，越容易在拷贝延迟波动时维持重叠，但也会消耗更多共享内存。
 
-## 13.8 同步机制的对比
+## 13.11 同步机制的对比
 
 | 特性 | `__syncthreads()` | `cuda::barrier` | `cuda::pipeline` |
 |------|------------------|-----------------|-----------------|
@@ -957,9 +974,9 @@ CUDA Programming Guide 也给出了建议：
 
 即：对于不需要异步重叠的简单同步场景，使用传统的 `__syncthreads()` 仍然是最优选择。
 
-## 13.9 异步操作的调试与错误处理
+## 13.12 异步操作的调试与错误处理
 
-### 13.9.1 常见问题诊断
+### 13.12.1 常见问题诊断
 
 使用异步操作时，常见的问题包括：
 
@@ -990,15 +1007,15 @@ bar.wait(std::move(token));  // 使用 phase N 的过期 token
 
 <strong>4. Pipeline 阶段溢出</strong>：`producer_acquire()` 超过 pipeline 的阶段数导致死锁。
 
-### 13.9.2 使用环境变量和工具调试
+### 13.12.2 使用环境变量和工具调试
 
 - `CUDA_LAUNCH_BLOCKING=1`：使所有 kernel 启动变为同步，便于隔离问题；
 - `cuda-memcheck` 工具检测共享内存的非法访问；
 - NVIDIA Compute Sanitizer 可以检测异步操作中的数据竞争。
 
-## 13.10 高级 Pipeline 模式
+## 13.13 高级 Pipeline 模式
 
-### 13.10.1 Pipeline 与 GEMM 的软件流水线
+### 13.13.1 Pipeline 与 GEMM 的软件流水线
 
 在矩阵乘法（GEMM）中，多阶段 Pipeline 用于实现 Global-to-Shared 内存拷贝与 Tensor Core 计算的重叠：
 
@@ -1066,7 +1083,7 @@ __global__ void gemm_pipeline(
 }
 ```
 
-### 13.10.2 动态阶段数选择
+### 13.13.2 动态阶段数选择
 
 Pipeline 的阶段数涉及权衡：
 
@@ -1084,7 +1101,7 @@ int select_pipeline_stages(size_t tile_bytes, size_t smem_per_block) {
 }
 ```
 
-### 13.10.3 Pipeline 交错模式
+### 13.13.3 Pipeline 交错模式
 
 ```cuda
 // 双 Pipeline 交错
@@ -1101,7 +1118,7 @@ pa.consumer_wait(); compute_a(); pa.consumer_release();
 pb.consumer_wait(); compute_b(); pb.consumer_release();
 ```
 
-## 13.11 与主机端异步操作的对比
+## 13.14 与主机端异步操作的对比
 
 | 特性 | 主机端异步 (cudaMemcpyAsync) | 设备端异步 (memcpy_async) |
 |------|---------------------------|-------------------------|
@@ -1114,9 +1131,9 @@ pb.consumer_wait(); compute_b(); pb.consumer_release();
 
 两种异步方式可以<strong>同时使用</strong>：设备端 pipeline 负责细粒度的 Global→Shared 重叠，主机端 Stream 负责不同 kernel 间的粗粒度重叠。
 
-## 13.13 常见问题与故障排除
+## 13.15 常见问题与故障排除
 
-### 13.13.1 `cuda::barrier` 死锁
+### 13.15.1 `cuda::barrier` 死锁
 
 <strong>症状</strong>：所有线程卡在 `bar.wait()` 调用上。
 
@@ -1130,7 +1147,7 @@ pb.consumer_wait(); compute_b(); pb.consumer_release();
 - 确保所有参与线程都在同一个代码路径中调用 `arrive()`；
 - 每次迭代使用新的 token。
 
-### 13.13.2 Pipeline 死锁
+### 13.15.2 Pipeline 死锁
 
 <strong>症状</strong>：`producer_acquire()` 永不返回。
 
@@ -1146,7 +1163,7 @@ for (int i = 0; i < num_iter; i++) {
 // 几个迭代后死锁
 ```
 
-### 13.13.3 `memcpy_async` 性能差
+### 13.15.3 `memcpy_async` 性能差
 
 <strong>常见原因</strong>：
 1. 拷贝大小不是 16 字节的倍数（回退到逐字节拷贝）；
@@ -1160,7 +1177,7 @@ for (int i = 0; i < num_iter; i++) {
 - 确保全局内存基地址 128 字节对齐；
 - 在 commit/wait 前使用 `__syncwarp()` 恢复 warp 收敛。
 
-### 13.13.4 数据完整性错误
+### 13.15.4 数据完整性错误
 
 <strong>症状</strong>：某些输出值不正确或为零。
 
@@ -1170,7 +1187,7 @@ for (int i = 0; i < num_iter; i++) {
 3. 确认 `producer_commit()` 在所有异步拷贝之后调用；
 4. 检查 `fence_proxy_async_shared_cta()` 是否在写回前调用（如果使用 TMA）。
 
-## 13.14 性能基准参考
+## 13.16 性能基准参考
 
 以下是在 A100 (CC 8.0) 上进行批量数据处理（100 批次，256 个 float 每批次）的性能参考：
 
@@ -1189,7 +1206,7 @@ for (int i = 0; i < num_iter; i++) {
 2. 多阶段 pipeline 带来显著提升（2-stage 比单阶段快 36%）；
 3. 从 3-stage 到 4-stage 的增量很小，因为瓶颈从拷贝转向了计算。
 
-## 13.15 迁移指南：从 __syncthreads 到异步模型
+## 13.17 迁移指南：从 __syncthreads 到异步模型
 
 如果你的现有代码使用传统的 `__syncthreads()` 模式，迁移到异步模型应该循序渐进：
 
@@ -1248,7 +1265,7 @@ for (int i = 0; i < n; i++) {
 - 验证计算和数据拷贝是否有实际重叠；
 - 调整 pipeline 阶段数以平衡共享内存和吞吐量。
 
-## 13.16 动手体验2：异步归约
+## 13.18 动手体验2：异步归约
 
 在第 12 章我们使用 Thread Block Cluster + DSM 进行分布式归约。这里展示一个使用 `cuda::barrier` 进行分阶段异步归约的替代方案：
 
@@ -1330,7 +1347,7 @@ for (int i = 0; i < n; i++) {
 }
 ```
 
-## 13.17 本章小结
+## 13.19 本章小结
 
 本章全面介绍了 CUDA 异步 SIMT 编程模型，涵盖以下要点：
 
@@ -1348,7 +1365,7 @@ for (int i = 0; i < n; i++) {
 
 异步 SIMT 编程模型是现代 GPU 编程中不可或缺的工具。随着 GPU 内存带宽与计算能力之间的差距不断拉大，将数据搬运隐藏在计算之后变得愈发重要。掌握这些 API 将显著提升你的 CUDA 程序性能。
 
-## 13.10 习题
+## 13.20 习题
 
 1. 解释 `cuda::barrier` 的"时间分割"（Temporal Splitting）五阶段模型。为什么 arrive 和 wait 之间的阶段是实现重叠的关键？
 
@@ -1362,7 +1379,7 @@ for (int i = 0; i < n; i++) {
 
 6. 说明 Warp Specialization 模式中为什么需要 4 个 barrier（2×2双缓冲），而不是 2 个。
 
-## 13.11 参考文献
+## 13.21 参考文献
 
 1. CUDA C++ Programming Guide 13.0, Section 5.5 "Asynchronous SIMT Programming Model"
 2. CUDA C++ Programming Guide 13.0, Section 10.26 "Asynchronous Barrier"

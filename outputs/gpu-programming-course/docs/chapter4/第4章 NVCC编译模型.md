@@ -263,14 +263,19 @@ ls -la ~/.nv/ComputeCache/
 
 <strong>二进制代码是体系结构相关的</strong>。一个 <strong>cubin</strong> 对象通过编译器选项 `-code` 指定目标架构来生成。例如，使用 `-code=sm_35` 编译会生成针对<strong>计算能力（Compute Capability）</strong> 3.5 的设备的二进制代码。
 
-二进制兼容性遵循<strong>单主版本内、向前兼容</strong>的规则：
+二进制兼容性规则：
+cubin遵循<strong>单主版本内、向前兼容</strong>的规则：
 
 > 为计算能力 <em>X.y</em> 生成的 cubin 对象仅能在计算能力 <em>X.z</em>（其中 <em>z >= y</em>）的设备上执行。
 
+PTX + JIT 兼容性规则：
+PTX 虚拟指令集遵循跨主版本向前兼容规则：
+为计算能力 <em>X.y </em>生成的 PTX 代码，可以在所有计算能力≥<em>X.y </em>的设备上通过 JIT 编译执行。
+
 具体来说：
-- <strong>向前兼容</strong>（同一个主版本 X 内）：`sm_35` 可以在 `sm_37` 上运行。`sm_50` 可以在 `sm_52`、`sm_53` 上运行。`sm_80` 可以在 `sm_86`、`sm_89` 上运行。
-- <strong>不支持向后兼容</strong>：`sm_80` 不能在 `sm_75` 上运行。
-- <strong>不支持跨主版本兼容</strong>：`sm_35` 不能在 `sm_50` 上运行（因为主版本 3 ≠ 5）。`sm_60` 不能在 `sm_70` 上运行（因为主版本 6 ≠ 7）。
+- <strong>向前兼容</strong>（同一个主版本 X 内）：`compute_35` 可以在 `sm_37` 上运行。`compute_50` 可以在 `sm_52`、`sm_53` 上运行。`compute_80` 可以在 `sm_86`、`sm_89` 上运行。
+- <strong>不支持向后兼容</strong>：`compute_80` 不能在 `sm_75` 上运行。
+- <strong>不支持跨主版本兼容</strong>：`compute_35` 不能在 `sm_50` 上运行（因为主版本 3 ≠ 5）。`compute_60` 不能在 `sm_70` 上运行（因为主版本 6 ≠ 7）。
 
 > <strong>注意</strong>：二进制兼容性仅支持桌面平台（Desktop）。Tegra 平台不支持二进制兼容性。桌面与 Tegra 之间的二进制兼容性也不支持。
 
@@ -671,7 +676,7 @@ NVCC 对 64 位和 32 位编译模式有明确的规则：
 - 32 位版本的 NVCC 可以使用 `-m64` 选项在 64 位模式下编译设备代码。
 - 64 位版本的 NVCC 可以使用 `-m32` 选项在 32 位模式下编译设备代码。
 
-> <strong>提示</strong>：在现代 CUDA 开发中（CUDA 10.0 及以后），NVIDIA 已不再提供 32 位版本的 CUDA Toolkit。所有开发都应在 64 位模式下进行。除非你在维护非常老旧的遗留系统，否则不需要关心 32 位模式。
+> <strong>提示</strong>：在现代 CUDA 开发中，NVIDIA 已在 CUDA 11.0 开始逐步废弃 32 位主机应用支持，CUDA 12.x 已完全移除 32 位编译功能。所有开发都应在 64 位模式下进行。除非你在维护非常老旧的遗留系统，否则不需要关心 32 位模式。
 
 ### 4.8.3 独立编译与分离编译
 
@@ -869,6 +874,69 @@ nvcc file.cu -o file -gencode ... -gencode ... -gencode ...
 
 CUDA 编译器需要为每个 `-gencode` 选项重新编译设备代码。将大型设备函数放在 `.cuh` 头文件中会导致它们在每个翻译单元中被重复编译。尽可能将设备代码放在 `.cu` 文件中，只将简洁的接口声明放在头文件中。
 
+### 4.8.6 CUDA Driver API 编译与运行时加载
+
+虽然大多数 CUDA 应用使用 Runtime API（`cuda*` 函数和自动 Fat Binary 管理），但了解 Driver API（`cu*` 函数）的编译模型也很重要。Driver API 提供了更精细的控制：
+
+<strong>编译为独立的 cubin 文件</strong>：
+
+```bash
+# 编译设备代码为独立 cubin（不包含主机代码）
+nvcc kernel.cu -cubin -arch=sm_80 -o kernel.cubin
+
+# 编译设备代码为 PTX（用于 JIT）
+nvcc kernel.cu -ptx -arch=compute_80 -o kernel.ptx
+
+# 或使用 Fat Binary 但保存为独立文件
+nvcc kernel.cu -fatbin -arch=sm_80 -o kernel.fatbin
+```
+
+<strong>在 Driver API 中加载 cubin</strong>：
+
+```cuda
+#include <cuda.h>  // Driver API 头文件
+
+// 初始化 Driver API（必须！）
+cuInit(0);
+
+// 获取设备
+CUdevice device;
+cuDeviceGet(&device, 0);
+
+// 创建上下文
+CUcontext context;
+cuCtxCreate(&context, 0, device);
+
+// 从文件加载 cubin 或 PTX 模块
+CUmodule module;
+cuModuleLoad(&module, "kernel.cubin");
+// 或加载 PTX：cuModuleLoad(&module, "kernel.ptx");
+
+// 获取内核函数句柄
+CUfunction kernel;
+cuModuleGetFunction(&kernel, module, "_Z8myKernelPf");
+
+// 设置参数并启动
+void *args[] = { &d_data, &N };
+cuLaunchKernel(kernel,
+               gridDimX, gridDimY, 1,    // grid 维度
+               blockDimX, 1, 1,           // block 维度
+               0,                          // 共享内存
+               NULL,                       // 流
+               args, NULL);                // 参数
+
+// 清理
+cuCtxDestroy(context);
+```
+
+Driver API 的优势是精确控制——你可以：
+- 在运行时选择加载哪个 .cubin 文件（基于设备检测）。
+- 看 JIT 编译确切的 PTX 代码。
+- 管理多个 CUDA 上下文。
+- 实现自定义的内核缓存和加载策略。
+
+> <strong>提示</strong>：Runtime API 在内部就是通过 Driver API 实现的。使用 Runtime API 时，NVCC 自动生成的代码本质上就是在执行类似上面 `cuModuleLoad` → `cuModuleGetFunction` → `cuLaunchKernel` 的操作。
+
 ## 4.9 构建系统集成与实战
 
 在真实项目中，CUDA 代码很少单独使用 `nvcc` 命令行编译，而是集成在构建系统中。本节介绍如何将 CUDA 编译集成到 CMake 和 Makefile 中。
@@ -983,7 +1051,6 @@ CUDA Toolkit 在运行时受多种环境变量的影响。以下是开发中常�
 | `CUDA_CACHE_DISABLE` | 设为 1 禁用 JIT 缓存 | `CUDA_CACHE_DISABLE=1` |
 | `CUDA_CACHE_PATH` | JIT 缓存目录 | `CUDA_CACHE_PATH=/tmp/cuda_cache` |
 | `CUDA_DEVICE_MAX_CONNECTIONS` | 每个设备的 CUDA 流多路复用能力 | 默认 8 |
-| `CUDA_ERROR_CHECKING` | 控制运行时错误检查粒度 | 默认中等 |
 | `CUDA_MANAGED_FORCE_DEVICE_ALLOC` | 强制统一内存分配在设备端 | |
 
 <strong>在开发中常用环境变量组合</strong>：
@@ -1010,68 +1077,6 @@ CUDA_CACHE_DISABLE=1 ./my_app
 | <strong>极致性能</strong> | 每架构单独编译分发 | 超算/HPC 环境 |
 | <strong>动态选择</strong> | Driver API 运行时加载 | 框架类库 |
 
-### 4.8.6 CUDA Driver API 编译与运行时加载
-
-虽然大多数 CUDA 应用使用 Runtime API（`cuda*` 函数和自动 Fat Binary 管理），但了解 Driver API（`cu*` 函数）的编译模型也很重要。Driver API 提供了更精细的控制：
-
-<strong>编译为独立的 cubin 文件</strong>：
-
-```bash
-# 编译设备代码为独立 cubin（不包含主机代码）
-nvcc kernel.cu -cubin -arch=sm_80 -o kernel.cubin
-
-# 编译设备代码为 PTX（用于 JIT）
-nvcc kernel.cu -ptx -arch=compute_80 -o kernel.ptx
-
-# 或使用 Fat Binary 但保存为独立文件
-nvcc kernel.cu -fatbin -arch=sm_80 -o kernel.fatbin
-```
-
-<strong>在 Driver API 中加载 cubin</strong>：
-
-```cuda
-#include <cuda.h>  // Driver API 头文件
-
-// 初始化 Driver API（必须！）
-cuInit(0);
-
-// 获取设备
-CUdevice device;
-cuDeviceGet(&device, 0);
-
-// 创建上下文
-CUcontext context;
-cuCtxCreate(&context, 0, device);
-
-// 从文件加载 cubin 或 PTX 模块
-CUmodule module;
-cuModuleLoad(&module, "kernel.cubin");
-// 或加载 PTX：cuModuleLoad(&module, "kernel.ptx");
-
-// 获取内核函数句柄
-CUfunction kernel;
-cuModuleGetFunction(&kernel, module, "_Z8myKernelPf");
-
-// 设置参数并启动
-void *args[] = { &d_data, &N };
-cuLaunchKernel(kernel,
-               gridDimX, gridDimY, 1,    // grid 维度
-               blockDimX, 1, 1,           // block 维度
-               0,                          // 共享内存
-               NULL,                       // 流
-               args, NULL);                // 参数
-
-// 清理
-cuCtxDestroy(context);
-```
-
-Driver API 的优势是精确控制——你可以：
-- 在运行时选择加载哪个 .cubin 文件（基于设备检测）。
-- 看 JIT 编译确切的 PTX 代码。
-- 管理多个 CUDA 上下文。
-- 实现自定义的内核缓存和加载策略。
-
-> <strong>提示</strong>：Runtime API 在内部就是通过 Driver API 实现的。使用 Runtime API 时，NVCC 自动生成的代码本质上就是在执行类似上面 `cuModuleLoad` → `cuModuleGetFunction` → `cuLaunchKernel` 的操作。
 
 ## 4.10 动手体验：编译和观察 Fat Binary
 
@@ -1289,7 +1294,7 @@ ls -la device_query*
 
 - <strong>`-arch` 和 `-code` 的关系？</strong> `-arch=compute_80` 指定 PTX 功能级别。`-code=sm_80` 指定 cubin 目标。简写 `-arch=sm_80` 等价于 `-arch=compute_80 -code=compute_80,sm_80`，同时嵌入了 cubin 和 PTX。
 
-- <strong>C++ 兼容性和 64 位支持？</strong> 主机代码完全支持 C++。设备代码仅支持 C++ 的一个子集（不支持 STL、异常和 RTTI）。现代 CUDA 开发均应在 64 位模式下进行（32 位支持已在 CUDA 10.0 后移除）。
+- <strong>C++ 兼容性和 64 位支持？</strong> 主机代码完全支持 C++。设备代码仅支持 C++ 的一个子集（不支持标准 C++ 异常和 RTTI，仅支持有限的 STL 子集）。现代 CUDA 开发均应在 64 位模式下进行（32 位主机应用支持已在 CUDA 11.0 开始逐步废弃，CUDA 12.x 已完全移除 32 位支持）。
 
 通过本章的学习，我们建立了对 CUDA 编译模型的系统理解。在下一章中，我们将进入 CUDA 运行时（CUDA Runtime）的世界，学习设备内存管理——如何在代码中分配和释放 GPU 内存，以及如何在主机和设备之间传输数据。这是编写任何 CUDA 程序都必不可少的基础技能！
 
