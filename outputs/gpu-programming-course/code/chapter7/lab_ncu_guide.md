@@ -1,4 +1,4 @@
-# 如何阅读 NVIDIA Nsight Compute (NCU) 报告
+#  NVIDIA Nsight Compute (NCU) 报告
 
 > 本教程以一个 `vectorAdd` kernel 的实际 profile 数据为例，带你系统性地读懂 NCU 报告的每个关键部分。
 
