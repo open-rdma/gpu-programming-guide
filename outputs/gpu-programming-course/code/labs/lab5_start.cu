@@ -14,8 +14,10 @@
  * 编译: nvcc lab5_start.cu -o lab5_start -lcublas
  */
 
-#include "sgemm_common.h"
-#include <cublas_v2.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <cuda_runtime.h>
 
 // TODO: 实现带 2D Block Tile 的 kernel
 // template <const int BM, const int BN, const int BK, const int TM, const int TN>

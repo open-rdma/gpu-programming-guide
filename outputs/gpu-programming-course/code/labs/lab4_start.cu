@@ -15,8 +15,10 @@
  * 运行: ./lab4_start
  */
 
-#include "sgemm_common.h"
-#include <cublas_v2.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <cuda_runtime.h>
 
 // TODO: 实现带 1D Block Tile 的 kernel
 // template <const int BM, const int BN, const int BK, const int TM>

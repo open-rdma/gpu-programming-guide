@@ -14,8 +14,11 @@
  * 编译: nvcc lab7_start.cu -o lab7_start -lcublas
  */
 
-#include "sgemm_common.h"
-#include <cublas_v2.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <cuda_runtime.h>
 
 const int NUM_THREADS = 256;
 

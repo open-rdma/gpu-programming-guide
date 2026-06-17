@@ -1,8 +1,11 @@
 /**
- * 实验2：全局内存合并访问 - 在线测评提交版
- * 无 cuBLAS 依赖，可直接在 CMake 环境编译运行
+ * 实验2：全局内存合并访问 - 参考解答
+ *
+ * 将 2D block 改为 1D block，重新映射线程到 C 矩阵的位置关系，
+ * 使连续的 threadIdx.x 对应连续的 C 列坐标，实现全局内存合并访问。
+ *
+ * 预期性能：矩阵 4096x4096 时约 1986.5 GFLOPS/s（比实验1提升约 6.4x）
  */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>

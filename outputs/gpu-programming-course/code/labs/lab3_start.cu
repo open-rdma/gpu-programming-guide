@@ -13,9 +13,10 @@
  * 编译: nvcc lab3_start.cu -o lab3_start -lcublas
  * 运行: ./lab3_start
  */
-
-#include "sgemm_common.h"
-#include <cublas_v2.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <cuda_runtime.h>
 
 // TODO: 实现使用共享内存缓存分块的 kernel
 // 参考结构：
