@@ -22,7 +22,7 @@ int main() {
 
     printf("Found %d CUDA device(s)\n\n", deviceCount);
 
-    // Print device info
+    // 打印设备信息
     for (int i = 0; i < deviceCount; i++) {
         cudaDeviceProp prop;
         CUDA_CHECK(cudaGetDeviceProperties(&prop, i));
@@ -31,7 +31,7 @@ int main() {
                prop.totalGlobalMem / (1024.0 * 1024.0 * 1024.0));
     }
 
-    // Check P2P capability between device 0 and 1
+    // 检查设备 0 和 1 之间的 P2P 能力
     int canAccess01, canAccess10;
     CUDA_CHECK(cudaDeviceCanAccessPeer(&canAccess01, 0, 1));
     CUDA_CHECK(cudaDeviceCanAccessPeer(&canAccess10, 1, 0));
@@ -41,75 +41,93 @@ int main() {
     printf("P2P Access: Device 1 -> Device 0: %s\n",
            canAccess10 ? "Supported" : "Not Supported");
 
-    // Test data size: 16MB
-    const size_t dataSize = 16 * 1024 * 1024;  // 16 MB
+    // 测试数据大小：16MB
+    const size_t dataSize = 16 * 1024 * 1024;
     const size_t numFloats = dataSize / sizeof(float);
     float *d_data0, *d_data1;
     float *h_data;
 
-    // Allocate device memory
+    // 分配设备内存
     CUDA_CHECK(cudaSetDevice(0));
     CUDA_CHECK(cudaMalloc(&d_data0, dataSize));
     CUDA_CHECK(cudaSetDevice(1));
     CUDA_CHECK(cudaMalloc(&d_data1, dataSize));
 
-    // Allocate page-locked host memory
+    // 分配页锁定主机内存
     CUDA_CHECK(cudaMallocHost(&h_data, dataSize));
 
-    // Initialize data
+    // 初始化数据
     for (size_t i = 0; i < numFloats; i++) {
         h_data[i] = (float)i;
     }
 
-    // Copy data to device 0
+    // 将数据拷贝到设备 0
     CUDA_CHECK(cudaSetDevice(0));
     CUDA_CHECK(cudaMemcpy(d_data0, h_data, dataSize, cudaMemcpyHostToDevice));
 
-    // Create events for timing
-    cudaEvent_t start, stop;
-    CUDA_CHECK(cudaEventCreate(&start));
-    CUDA_CHECK(cudaEventCreate(&stop));
+    // ---------- 预创建设备 0 和设备 1 各自的事件对 ----------
+    cudaEvent_t start0, stop0;   // 用于设备 0 上的计时
+    cudaEvent_t start1, stop1;   // 用于设备 1 上的计时
+
+    CUDA_CHECK(cudaSetDevice(0));
+    CUDA_CHECK(cudaEventCreate(&start0));
+    CUDA_CHECK(cudaEventCreate(&stop0));
+
+    CUDA_CHECK(cudaSetDevice(1));
+    CUDA_CHECK(cudaEventCreate(&start1));
+    CUDA_CHECK(cudaEventCreate(&stop1));
+
     float elapsedTime;
 
-    // === Test 1: P2P direct copy using cudaMemcpyPeer ===
+    // === 测试1: P2P 直接拷贝（使用 cudaMemcpyPeer）===
     CUDA_CHECK(cudaSetDevice(0));
-    CUDA_CHECK(cudaEventRecord(start, 0));
+    CUDA_CHECK(cudaEventRecord(start0, 0));
     CUDA_CHECK(cudaMemcpyPeer(d_data1, 1, d_data0, 0, dataSize));
-    CUDA_CHECK(cudaEventRecord(stop, 0));
-    CUDA_CHECK(cudaEventSynchronize(stop));
-    CUDA_CHECK(cudaEventElapsedTime(&elapsedTime, start, stop));
+    CUDA_CHECK(cudaEventRecord(stop0, 0));
+    CUDA_CHECK(cudaEventSynchronize(stop0));
+    CUDA_CHECK(cudaEventElapsedTime(&elapsedTime, start0, stop0));
     printf("\n=== P2P Memory Copy Performance ===\n");
     printf("P2P direct copy (cudaMemcpyPeer): %.3f ms, Bandwidth: %.2f GB/s\n",
            elapsedTime, (dataSize / (elapsedTime / 1000.0)) / (1024.0 * 1024.0 * 1024.0));
 
-    // === Test 2: Copy via host staging ===
+    // === 测试2: 通过主机中转的拷贝（分段计时并累加）===
+    // 第一段：设备 0 -> 主机
     CUDA_CHECK(cudaSetDevice(0));
-    CUDA_CHECK(cudaEventRecord(start, 0));
-    // Device 0 -> Host
+    CUDA_CHECK(cudaEventRecord(start0, 0));
     CUDA_CHECK(cudaMemcpy(h_data, d_data0, dataSize, cudaMemcpyDeviceToHost));
-    // Host -> Device 1
-    CUDA_CHECK(cudaSetDevice(1));
-    CUDA_CHECK(cudaMemcpy(d_data1, h_data, dataSize, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaEventRecord(stop, 0));
-    CUDA_CHECK(cudaEventSynchronize(stop));
-    CUDA_CHECK(cudaEventElapsedTime(&elapsedTime, start, stop));
-    printf("Host-staged copy (D2H + H2D):   %.3f ms, Bandwidth: %.2f GB/s\n",
-           elapsedTime, (dataSize / (elapsedTime / 1000.0)) / (1024.0 * 1024.0 * 1024.0));
+    CUDA_CHECK(cudaEventRecord(stop0, 0));
+    CUDA_CHECK(cudaEventSynchronize(stop0));
+    float timeD2H;
+    CUDA_CHECK(cudaEventElapsedTime(&timeD2H, start0, stop0));
 
-    // === Test 3: Try P2P access with UVA ===
+    // 第二段：主机 -> 设备 1
+    CUDA_CHECK(cudaSetDevice(1));
+    CUDA_CHECK(cudaEventRecord(start1, 0));
+    CUDA_CHECK(cudaMemcpy(d_data1, h_data, dataSize, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaEventRecord(stop1, 0));
+    CUDA_CHECK(cudaEventSynchronize(stop1));
+    float timeH2D;
+    CUDA_CHECK(cudaEventElapsedTime(&timeH2D, start1, stop1));
+
+    float totalStagedTime = timeD2H + timeH2D;
+    printf("Host-staged copy (D2H + H2D):   %.3f ms, Bandwidth: %.2f GB/s\n",
+           totalStagedTime,
+           (dataSize / (totalStagedTime / 1000.0)) / (1024.0 * 1024.0 * 1024.0));
+
+    // === 测试3: 尝试启用 P2P 访问后的 UVA 直接访问 ===
     if (canAccess01 && canAccess10) {
         CUDA_CHECK(cudaSetDevice(0));
         CUDA_CHECK(cudaDeviceEnablePeerAccess(1, 0));
         CUDA_CHECK(cudaSetDevice(1));
         CUDA_CHECK(cudaDeviceEnablePeerAccess(0, 0));
 
-        // Use cudaMemcpyDefault for P2P copy
+        // 使用 cudaMemcpyDefault 进行 P2P 拷贝
         CUDA_CHECK(cudaSetDevice(0));
-        CUDA_CHECK(cudaEventRecord(start, 0));
+        CUDA_CHECK(cudaEventRecord(start0, 0));
         CUDA_CHECK(cudaMemcpy(d_data1, d_data0, dataSize, cudaMemcpyDefault));
-        CUDA_CHECK(cudaEventRecord(stop, 0));
-        CUDA_CHECK(cudaEventSynchronize(stop));
-        CUDA_CHECK(cudaEventElapsedTime(&elapsedTime, start, stop));
+        CUDA_CHECK(cudaEventRecord(stop0, 0));
+        CUDA_CHECK(cudaEventSynchronize(stop0));
+        CUDA_CHECK(cudaEventElapsedTime(&elapsedTime, start0, stop0));
         printf("P2P copy via cudaMemcpyDefault:   %.3f ms, Bandwidth: %.2f GB/s\n",
                elapsedTime,
                (dataSize / (elapsedTime / 1000.0)) / (1024.0 * 1024.0 * 1024.0));
@@ -117,14 +135,16 @@ int main() {
         printf("\nP2P access enabled successfully. Same pointer can be used on both devices.\n");
     }
 
-    // Cleanup
+    // 清理资源
     CUDA_CHECK(cudaFreeHost(h_data));
     CUDA_CHECK(cudaSetDevice(0));
     CUDA_CHECK(cudaFree(d_data0));
     CUDA_CHECK(cudaSetDevice(1));
     CUDA_CHECK(cudaFree(d_data1));
-    CUDA_CHECK(cudaEventDestroy(start));
-    CUDA_CHECK(cudaEventDestroy(stop));
+    CUDA_CHECK(cudaEventDestroy(start0));
+    CUDA_CHECK(cudaEventDestroy(stop0));
+    CUDA_CHECK(cudaEventDestroy(start1));
+    CUDA_CHECK(cudaEventDestroy(stop1));
 
     printf("\nTest completed successfully.\n");
     return 0;

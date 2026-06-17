@@ -28,7 +28,7 @@ NVIDIA GPU 架构围绕一个可扩展的<strong>流式多处理器（Streaming 
 - <strong>L1 缓存/共享内存</strong>：共享的片上存储器，可在 L1 缓存和共享内存之间灵活划分。
 - <strong>常量缓存和纹理缓存</strong>：只读缓存。
 
-指令在 SM 中是流水线化的（pipelined），利用单一线程内的指令级并行性（instruction-level parallelism），以及通过同时硬件多线程（simultaneous hardware multithreading）实现的广泛线程级并行性。与 CPU 核心不同，指令是按顺序发出的（in-order issue），没有分支预测或推测执行。
+指令在 SM 中是流水线化的（pipelined），利用单一线程内的指令级并行性（instruction-level parallelism），以及通过同时硬件多线程（simultaneous hardware multithreading）实现的广泛线程级并行性。与 CPU 核心不同，指令是顺序发出的（in-order issue），现代 GPU 包含分支预测单元以减少 warp 发散带来的性能损失，但与 CPU 不同，它没有推测执行（speculative execution）。
 
 <div align="center"><img src="../images/chapter9-figures/automatic-scalability.png" /><p>图 9.1 CUDA 线程块在多处理器上的自动可扩展性</p></div>
 
@@ -110,17 +110,37 @@ __global__ void divergentKernel(float* data, int N) {
 例如，以下代码在 Pascal 及更早架构上可能可以工作（依赖 warp 内的隐式同步）：
 
 ```cuda
-// 不安全的 warp 内归约（在 Volta+ 上可能产生错误结果）
-__device__ int warpReduce(int val) {
-    // 假设 warp 内的线程以锁步方式执行
+// 不安全的 warp 内归约（依赖隐式同步，Volta+ 上可能出错）
+__device__ int unsafeWarpReduce(int val) {
+    __shared__ int smem[32];
+    int tid = threadIdx.x;
+    smem[tid] = val;
+    // 缺少显式同步：其他线程可能看不到 smem[tid] 的写入
     for (int offset = 16; offset > 0; offset /= 2) {
-        val += __shfl_down_sync(0xFFFFFFFF, val, offset);
+        if (tid < offset) {
+            smem[tid] += smem[tid + offset];
+        }
     }
-    return val;
+    return smem[0];
+}
+
+// 安全的 warp 内归约（使用显式同步）
+__device__ int safeWarpReduce(int val) {
+    __shared__ int smem[32];
+    int tid = threadIdx.x;
+    smem[tid] = val;
+    __syncwarp();  // 确保所有线程完成写入后再继续
+    for (int offset = 16; offset > 0; offset /= 2) {
+        if (tid < offset) {
+            smem[tid] += smem[tid + offset];
+        }
+        __syncwarp();  // 确保累加结果对其他线程可见
+    }
+    return smem[0];
 }
 ```
 
-在 Volta+ 上，需要使用明确的同步掩码（mask）和 `__syncwarp()` 来确保正确性。
+当 warp 内的线程通过共享内存来通信时，编译器可能会将共享内存访问优化到寄存器中，导致一个线程看不到另一个线程写入的值。__syncwarp() 会强制编译器在同步点重新加载共享内存的值，确保 warp 内的所有线程在同步点之后看到一致的内存视图。
 
 ### 9.3.7 活跃线程与不活跃线程
 
@@ -253,7 +273,7 @@ cudaOccupancyMaxPotentialBlockSizeVariableSMem(
 | 2.x (Fermi) | 2 | 2 (来自不同 warp) |
 | 3.x (Kepler) | 4 | 4 |
 | 5.x (Maxwell) | 4 | 4 |
-| 6.x (Pascal) | 2 | 2 |
+| 6.x (Pascal) | 2或4 | 2或4 |
 | 7.x (Volta) | 4 | 4 |
 | 8.x (Ampere) | 4 | 4 |
 
@@ -280,7 +300,8 @@ cudaOccupancyMaxPotentialBlockSizeVariableSMem(
 
 理解 warp 的另一个重要原因是<strong>全局内存合并访问（coalesced access）</strong>。当 warp 中的所有 32 个线程访问全局内存时，硬件会尝试将这些访问合并为尽可能少的内存事务。
 
-在较新的 GPU 架构（计算能力 6.0+）上，合并规则已经简化：如果 warp 内的线程访问同一 32 字节对齐段内的地址，这些访问会被合并。如果访问跨越了 32 字节边界，则需要多个内存事务。
+在计算能力 6.0 及以上的现代 GPU 中，硬件访问全局内存的基本单元是 32 字节的内存事务。如果一个 warp 的 32 个线程访问连续的 128 字节数据，硬件会将其“打包”成 4 次 32 字节的事务来完成。
+访问是否对齐也至关重要。如果 32 个线程访问的起始地址是 128 字节的倍数，硬件可以最高效地完成这些事务；否则，一个 warp 的访问可能会跨越更多的 32 字节扇区，导致额外的内存事务，降低有效带宽。
 
 考虑以下两种访问模式：
 

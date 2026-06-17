@@ -1,5 +1,5 @@
 /*
- * 第16章 代码示例：Cluster Group + 分布式共享内存
+ * 第16章 代码示例：Cluster Group + 分布式共享内存 
  * 硬件要求：CC 9.0+ (Hopper H100+)
  * 编译：nvcc -arch=sm_90 -rdc=true cluster_dsm_example.cu -o cluster_dsm_example
  *
@@ -9,6 +9,7 @@
 #include <cuda_runtime.h>
 #include <cooperative_groups.h>
 #include <stdio.h>
+#include <cmath>
 
 namespace cg = cooperative_groups;
 
@@ -60,31 +61,32 @@ clusterReduceKernel(const float *input, float *output, int n) {
     }
     __syncthreads();
 
-    // 阶段2：使用DSM进行跨块归约
+    // 阶段2：使用DSM进行跨块归约（修正竞态条件）
     cluster.sync();
 
     // 使用二叉树归约合并所有块的部分和
     for (int stride = 1; stride < numBlocks; stride <<= 1) {
-        float otherBlockSum = 0.0f;
+        float remoteSum = 0.0f;
+
+        // 每个块的tid==0读取远程伙伴块的s_blockSum
         if (tid == 0) {
-            int otherBlock = blockRank ^ stride;
-            if (otherBlock < numBlocks) {
+            int remoteBlock = blockRank ^ stride;
+            if (remoteBlock < numBlocks) {
                 // 使用map_shared_rank访问远程块的共享内存
-                float *remoteBlockSum =
-                    cluster.map_shared_rank(&s_blockSum, otherBlock);
-                otherBlockSum = *remoteBlockSum;
+                float *remotePtr = cluster.map_shared_rank(&s_blockSum, remoteBlock);
+                remoteSum = *remotePtr;
             }
         }
-        // 广播otherBlockSum到块内所有线程
-        __syncthreads();
-        s_partialSum[tid] = otherBlockSum;
-        __syncthreads();
 
+        // 【关键修正1】确保所有块都已经完成对远程值的读取
+        cluster.sync();
+
+        // 将远程值累加到本地s_blockSum（仅tid==0执行）
         if (tid == 0) {
-            s_blockSum += s_partialSum[0];
+            s_blockSum += remoteSum;
         }
-        __syncthreads();
 
+        // 【关键修正2】确保所有块都已经完成累加，再进入下一轮
         cluster.sync();
     }
 
@@ -99,7 +101,7 @@ int main() {
     float *h_input = (float*)malloc(N * sizeof(float));
     float h_expected = 0.0f;
 
-    // 初始化数据
+    // 初始化数据（全1，方便验证）
     for (int i = 0; i < N; i++) {
         h_input[i] = 1.0f;
         h_expected += h_input[i];
@@ -133,14 +135,21 @@ int main() {
     void *args[] = {&d_input, &d_output, &N};
     cudaLaunchKernelEx(&config, clusterReduceKernel);
 
+    // 检查内核启动错误
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("Kernel launch failed: %s\n", cudaGetErrorString(err));
+        return 1;
+    }
+
     float h_output;
     cudaMemcpy(&h_output, d_output, sizeof(float), cudaMemcpyDeviceToHost);
 
-    printf("Cluster DSM Reduce:\n");
+    printf("Cluster DSM Reduce (Corrected):\n");
     printf("  Expected sum: %.1f\n", h_expected);
     printf("  Computed sum: %.1f\n", h_output);
     printf("  Match: %s\n",
-           fabsf(h_output - h_expected) < 1e-3f ? "YES" : "NO");
+           std::fabs(h_output - h_expected) < 1e-3f ? "YES" : "NO");
 
     free(h_input);
     cudaFree(d_input);

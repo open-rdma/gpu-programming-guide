@@ -13,8 +13,12 @@
  * 编译: nvcc lab8_start.cu -o lab8_start -lcublas
  */
 
-#include "sgemm_common.h"
-#include <cublas_v2.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <cstring>
+#include <cmath>
+#include <cuda_runtime.h>
 
 // Warp size 是硬件常量，不是 C++ constexpr
 #define WARPSIZE 32

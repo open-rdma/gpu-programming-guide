@@ -463,6 +463,10 @@ CUDA Programming Guide对多块版本的补充说明：
 >
 > （16x16（256个线程）的线程块大小虽然在本题中是任意的，但这是一个常见的选择。网格被创建为具有足够的线程块，使得像前面一样每个矩阵元素对应一个线程。为简单起见，此示例假设每个维度上每个网格的线程数能够被该维度上每个线程块的线程数整除，尽管实际情况并非总是如此。）
 
+**注意**：以上代码使用 `float A[N][N]` 语法，假设 `N` 为编译时常量，属于示意性代码。在实际开发中，我们通常使用一维指针 `float*` 配合索引计算来访问矩阵数据，参见2.7.3节的实际代码。
+
+**思考题**：为什么在实际CUDA开发中我们通常使用一维指针`float*`来表示二维矩阵，而不是直接使用二维数组`float A[N][N]`？（提示：考虑内存布局、硬件寻址方式及性能影响）
+
 ### 2.4.2 边界检查——CUDA编程的基本安全实践
 
 当数据大小不能被线程块大小整除时，一些额外的线程会被启动但没有对应的工作。这要求我们在内核中加入<strong>边界检查（Boundary Checking）</strong>。
@@ -533,6 +537,8 @@ CUDA Programming Guide对其功能做了如下说明：
 > "Threads within a block can cooperate by sharing data through some shared memory and by synchronizing their execution to coordinate memory accesses. More precisely, one can specify synchronization points in the kernel by calling the __syncthreads() intrinsic function; __syncthreads() acts as a barrier at which all threads in the block must wait before any is allowed to proceed."
 >
 > （一个线程块内的线程可以通过共享内存共享数据，并通过同步它们的执行来协调内存访问。更准确地说，你可以在内核中通过调用`__syncthreads()`内建函数来指定同步点；`__syncthreads()`充当一个屏障，线程块中的所有线程都必须在此处等待，然后才允许任何线程继续执行。）
+
+除了作为执行屏障，`__syncthreads()` 同时也是一个**内存栅栏**（Memory Fence）：它保证调用前所有线程对共享内存（以及全局内存）的写入，在调用后对线程块内的所有线程可见。这意味着线程 A 在 `__syncthreads()` 之前写入共享内存的数据，在线程 B 通过 `__syncthreads()` 之后一定可以被正确读取。这一点对于正确使用共享内存至关重要，我们将在后续章节中深入探讨。
 
 ### 2.5.2 典型使用模式
 

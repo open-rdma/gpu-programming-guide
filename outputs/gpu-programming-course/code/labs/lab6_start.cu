@@ -14,8 +14,10 @@
  * 编译: nvcc lab6_start.cu -o lab6_start -lcublas
  */
 
-#include "sgemm_common.h"
-#include <cublas_v2.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <cuda_runtime.h>
 
 // TODO: 实现向量化内存访问的 kernel
 // 提示：

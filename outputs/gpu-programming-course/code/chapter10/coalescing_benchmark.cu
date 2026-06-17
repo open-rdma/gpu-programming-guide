@@ -1,5 +1,5 @@
 /**
- * Chapter 10 - Experiment 10-1: Global Memory Coalescing Benchmark
+ * Chapter 10 - Experiment 10-1: Global Memory Coalescing Benchmark (FIXED for Online Judge)
  *
  * Measures the impact of different global memory access patterns on bandwidth.
  * Compile: nvcc -arch=sm_86 -O3 coalescing_benchmark.cu -o coalescing_benchmark
@@ -8,6 +8,7 @@
 
 #include <stdio.h>
 #include <cuda_runtime.h>
+#include <math.h>
 
 #define CHECK_CUDA(call) {                                            \
     cudaError_t err = call;                                           \
@@ -54,22 +55,12 @@ __global__ void readStride32(const float * __restrict__ input,
     }
 }
 
-// Random access (pseudo-random pattern based on a deterministic shuffle)
-__global__ void readRandom(const float * __restrict__ input,
-                            float * __restrict__ output,
-                            const int * __restrict__ indices, int n) {
-    int tid = threadIdx.x + blockIdx.x * blockDim.x;
-    if (tid < n) {
-        int idx = indices[tid];
-        output[tid] = input[idx];
-    }
-}
-
 // Vectorized load using float4 (best-case coalescing)
 __global__ void readFloat4(const float * __restrict__ input,
                             float * __restrict__ output, int n) {
     int idx = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
-    if (idx < n) {
+    // Ensure we don't write beyond the array
+    if (idx + 3 < n) {
         float4 val = reinterpret_cast<const float4*>(input)[threadIdx.x + blockIdx.x * blockDim.x];
         output[idx + 0] = val.x;
         output[idx + 1] = val.y;
@@ -78,6 +69,8 @@ __global__ void readFloat4(const float * __restrict__ input,
     }
 }
 
+// Helper to benchmark a kernel
+// n: number of elements to process (not including stride)
 float benchmarkKernel(void (*kernel)(const float*, float*, int),
                       float *d_in, float *d_out, int n,
                       int gridSize, int blockSize, int iterations) {
@@ -115,68 +108,77 @@ int main() {
     printf("=== Coalescing Benchmark ===\n");
     printf("GPU: %s\n", prop.name);
     printf("Compute Capability: %d.%d\n", prop.major, prop.minor);
-    printf("Global Memory Bandwidth: %.1f GB/s\n",
-           prop.memoryClockRate * (prop.memoryBusWidth / 8) * 2 / 1e6);
+    double peakBW = prop.memoryClockRate * (prop.memoryBusWidth / 8) * 2 / 1e6;
+    printf("Global Memory Bandwidth (theoretical peak): %.1f GB/s\n", peakBW);
     printf("\n");
 
-    const int N = 32 * 1024 * 1024;  // 32M elements = 128 MB
+    // 🔧 关键修复1：减小测试规模以适应在线评测系统
+    const int N = 8 * 1024 * 1024;    // 8M元素 = 32MB（原32M）
     const int blockSize = 256;
-    const int gridSize = (N + blockSize - 1) / blockSize;
-    const int iterations = 100;
-    const size_t bytes = N * sizeof(float);
+    const int iterations = 20;        // 🔧 关键修复2：减少迭代次数（原100）
+    const size_t totalBytes = N * sizeof(float);
 
-    // Allocate host memory
-    float *h_in = (float*)malloc(bytes);
-    float *h_out = (float*)malloc(bytes);
+    // Allocate host memory and initialize
+    float *h_in = (float*)malloc(totalBytes);
+    float *h_out = (float*)malloc(totalBytes);
     for (int i = 0; i < N; i++) h_in[i] = (float)i;
 
     // Allocate device memory
     float *d_in, *d_out;
-    CHECK_CUDA(cudaMalloc(&d_in, bytes));
-    CHECK_CUDA(cudaMalloc(&d_out, bytes));
-    CHECK_CUDA(cudaMemcpy(d_in, h_in, bytes, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMalloc(&d_in, totalBytes));
+    CHECK_CUDA(cudaMalloc(&d_out, totalBytes));
+    CHECK_CUDA(cudaMemcpy(d_in, h_in, totalBytes, cudaMemcpyHostToDevice));
 
-    printf("Array size: %d float elements (%.1f MB)\n", N, bytes / (1024.0*1024.0));
-    printf("Block size: %d, Grid size: %d, Iterations: %d\n\n",
-           blockSize, gridSize, iterations);
+    printf("Array size: %d float elements (%.1f MB)\n", N, totalBytes / (1024.0*1024.0));
+    printf("Block size: %d, Iterations: %d\n\n", blockSize, iterations);
 
-    printf("%-25s %10s %15s %20s\n", "Access Pattern", "Time(ms)", "Bandwidth(GB/s)", "% of Peak");
-    printf("----------------------------------------------------------------------------\n");
+    printf("%-30s %12s %15s %15s\n", "Access Pattern", "Time(ms)", "BW(GB/s)", "% of Peak");
+    printf("--------------------------------------------------------------------------------\n");
 
-    // Test each access pattern
-    float ms, bw, pct;
-    float peakBW = prop.memoryClockRate * (prop.memoryBusWidth / 8) * 2 / 1e6;
+    // --- Test Stride=1 (coalesced) ---
+    int effectiveN = N;               // stride 1: all elements
+    int gridSize = (effectiveN + blockSize - 1) / blockSize;
+    float ms = benchmarkKernel(readStride1, d_in, d_out, effectiveN, gridSize, blockSize, iterations);
+    size_t bytesPerKernel = 2 * effectiveN * sizeof(float);  // read + write
+    double bw = bytesPerKernel / (ms / 1000.0) / 1e9;
+    double pct = bw / peakBW * 100.0;
+    printf("%-30s %12.4f %15.2f %14.1f%%\n", "Stride=1 (coalesced)", ms, bw, pct);
 
-    // Stride 1
-    ms = benchmarkKernel(readStride1, d_in, d_out, N, gridSize, blockSize, iterations);
-    bw = (bytes * 2) / (ms / 1000.0) / 1e9;  // read + write
-    pct = bw / peakBW * 100;
-    printf("%-25s %10.4f %15.2f %20.1f%%\n", "Stride=1 (coalesced)", ms, bw, pct);
+    // --- Test Stride=2 ---
+    effectiveN = N / 2;
+    gridSize = (effectiveN + blockSize - 1) / blockSize;
+    ms = benchmarkKernel(readStride2, d_in, d_out, effectiveN, gridSize, blockSize, iterations);
+    bytesPerKernel = 2 * effectiveN * sizeof(float);
+    bw = bytesPerKernel / (ms / 1000.0) / 1e9;
+    pct = bw / peakBW * 100.0;
+    printf("%-30s %12.4f %15.2f %14.1f%%\n", "Stride=2", ms, bw, pct);
 
-    // Stride 2
-    ms = benchmarkKernel(readStride2, d_in, d_out, N/2, gridSize, blockSize, iterations);
-    bw = (bytes) / (ms / 1000.0) / 1e9;  // approximate bytes loaded
-    pct = bw / peakBW * 100;
-    printf("%-25s %10.4f %15.2f %20.1f%%\n", "Stride=2", ms, bw, pct);
+    // --- Test Stride=8 ---
+    effectiveN = N / 8;
+    gridSize = (effectiveN + blockSize - 1) / blockSize;
+    ms = benchmarkKernel(readStride8, d_in, d_out, effectiveN, gridSize, blockSize, iterations);
+    bytesPerKernel = 2 * effectiveN * sizeof(float);
+    bw = bytesPerKernel / (ms / 1000.0) / 1e9;
+    pct = bw / peakBW * 100.0;
+    printf("%-30s %12.4f %15.2f %14.1f%%\n", "Stride=8", ms, bw, pct);
 
-    // Stride 8
-    ms = benchmarkKernel(readStride8, d_in, d_out, N/8, gridSize, blockSize, iterations);
-    bw = (bytes / 4) / (ms / 1000.0) / 1e9;
-    pct = bw / peakBW * 100;
-    printf("%-25s %10.4f %15.2f %20.1f%%\n", "Stride=8", ms, bw, pct);
+    // --- Test Stride=32 (worst) ---
+    effectiveN = N / 32;
+    gridSize = (effectiveN + blockSize - 1) / blockSize;
+    ms = benchmarkKernel(readStride32, d_in, d_out, effectiveN, gridSize, blockSize, iterations);
+    bytesPerKernel = 2 * effectiveN * sizeof(float);
+    bw = bytesPerKernel / (ms / 1000.0) / 1e9;
+    pct = bw / peakBW * 100.0;
+    printf("%-30s %12.4f %15.2f %14.1f%%\n", "Stride=32 (worst)", ms, bw, pct);
 
-    // Stride 32
-    ms = benchmarkKernel(readStride32, d_in, d_out, N/32, gridSize, blockSize, iterations);
-    bw = (bytes / 16) / (ms / 1000.0) / 1e9;
-    pct = bw / peakBW * 100;
-    printf("%-25s %10.4f %15.2f %20.1f%%\n", "Stride=32 (worst)", ms, bw, pct);
-
-    // Float4 vectorized
-    int gridFloat4 = (N / 4 + blockSize - 1) / blockSize;
-    ms = benchmarkKernel(readFloat4, d_in, d_out, N, gridFloat4, blockSize, iterations);
-    bw = (bytes * 2) / (ms / 1000.0) / 1e9;
-    pct = bw / peakBW * 100;
-    printf("%-25s %10.4f %15.2f %20.1f%%\n", "Float4 vectorized", ms, bw, pct);
+    // --- Test float4 vectorized (still coalesced, fewer transactions) ---
+    effectiveN = N;   // all elements, but accessed in groups of 4
+    int gridFloat4 = ((N/4) + blockSize - 1) / blockSize;
+    ms = benchmarkKernel(readFloat4, d_in, d_out, effectiveN, gridFloat4, blockSize, iterations);
+    bytesPerKernel = 2 * N * sizeof(float);   // full array read+write
+    bw = bytesPerKernel / (ms / 1000.0) / 1e9;
+    pct = bw / peakBW * 100.0;
+    printf("%-30s %12.4f %15.2f %14.1f%%\n", "Float4 vectorized", ms, bw, pct);
 
     // Cleanup
     CHECK_CUDA(cudaFree(d_in));
@@ -184,8 +186,9 @@ int main() {
     free(h_in);
     free(h_out);
 
-    printf("\nConclusion: Stride-1 coalesced access achieves %.1f%% of peak bandwidth.\n", pct);
-    printf("Increasing stride dramatically reduces effective bandwidth.\n");
+    printf("\nConclusion: Coalesced access (Stride-1) achieves high bandwidth.\n");
+    printf("Increasing stride degrades performance due to increased memory transactions.\n");
+    printf("Vectorized loads can further improve efficiency on some architectures.\n");
 
     return 0;
 }

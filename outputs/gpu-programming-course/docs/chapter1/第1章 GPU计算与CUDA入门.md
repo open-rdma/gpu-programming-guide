@@ -22,7 +22,7 @@
 - <strong>复杂的控制逻辑</strong>：分支预测（Branch Prediction）、乱序执行（Out-of-Order Execution）、超标量流水线（Superscalar Pipeline）等
 - <strong>大型缓存层次结构</strong>：L1、L2、L3缓存，以减少指令和数据访问的平均延迟
 
-这种设计使得CPU能够高效地执行那些具有复杂控制流、大量分支和不可预测内存访问模式的程序。一个典型的现代CPU核心可以同时执行几十个（通常是2-4个硬件线程）线程。
+这种设计使得 CPU 能够高效处理具有复杂控制流、大量分支及不可预测内存访问模式的程序。现代多核 CPU 通常支持同时执行数十个硬件线程，一般每个物理核心具备维护 1 至 2 个独立线程上下文的能力。
 
 而<strong>图形处理单元（GPU）</strong>的设计目标截然不同。GPU被设计为能够在同一时刻执行数千个线程，以<strong>最大化整体吞吐量（Throughput）</strong>。为了达成这一目标，GPU将更多晶体管用于<strong>数据计算</strong>（如浮点运算单元ALU），而非数据缓存和流控制。
 
@@ -37,7 +37,7 @@ CUDA Programming Guide对这两种设计理念给出了权威的阐述：
 | 维度             | CPU                            | GPU                            |
 | :--------------- | :----------------------------- | :----------------------------- |
 | <strong>设计目标</strong> | 最小化单个线程的延迟           | 最大化整体吞吐量               |
-| <strong>并发线程数</strong> | 几十个（~2-64 per core）       | 数千至数万个                   |
+| <strong>并发线程数</strong> | 几十个       | 数千至数万个                   |
 | <strong>晶体管分配</strong> | 大型缓存 + 复杂控制逻辑        | 大量ALU + 精简控制             |
 | <strong>内存延迟处理</strong> | 大缓存 + 预取                  | 线程切换掩藏延迟               |
 | <strong>时钟频率</strong>    | 更高（~3-5 GHz）               | 相对较低（~1-2 GHz）           |
@@ -125,7 +125,7 @@ CUDA Programming Guide以这样的方式介绍了CUDA：
 CUDA的革命性在于：它将GPU并行计算的能力直接暴露给了程序员，无需经过图形API。程序员可以用熟悉的C/C++语言编写GPU上执行的代码，大大降低了GPU编程的门槛。
 
 在CUDA诞生之后的这些年里，它已经深刻地改变了多个计算领域：
-- <strong>2007年</strong>：第一批CUDA GPU（G80架构）发布
+- <strong>2006年</strong>：首款支持 CUDA 的 GPU（G80 架构，GeForce 8800）发布
 - <strong>2012年</strong>：AlexNet使用CUDA训练，开启了深度学习时代
 - <strong>2016年</strong>：Pascal架构P100 GPU将混合精度计算带入数据中心
 - <strong>2017年</strong>：Volta架构引入Tensor Core，深度学习训练大幅加速

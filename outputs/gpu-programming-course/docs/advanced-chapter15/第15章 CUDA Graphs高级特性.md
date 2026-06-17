@@ -161,7 +161,7 @@ cudaLaunchKernelEx(&configSecondary, secondary_kernel);
 <strong>关键语义</strong>：
 
 - 当 `secondary_kernel` 使用 `cudaLaunchAttributeProgrammaticStreamSerialization` 属性启动时，CUDA驱动可以安全地提前启动该kernel，不需要等待主kernel的完成和内存刷新。
-- 当所有主kernel的线程块都已启动并执行了 `cudaTriggerProgrammaticLaunchCompletion` 时，驱动就可以启动次kernel。如果主kernel没有显式调用该触发函数，它会隐式地在主kernel的所有线程块退出后发生。
+- 当主 kernel 的所有线程块都调用了 cudaTriggerProgrammaticLaunchCompletion() 或主 kernel 完全执行完毕（隐式触发）时，CUDA 驱动才可以启动次 kernel。每个线程块必须且只能调用该函数一次。
 - <strong>重要提示</strong>：PDL只是提供了主kernel和次kernel<strong>可能</strong>并发执行的机会，这种并发行为是<strong>投机性的</strong>（opportunistic），并不保证一定会并发。依赖这种并发执行是不安全的，可能导致死锁。
 
 ### 15.3.3 PDL在CUDA Graph中的应用
@@ -492,10 +492,14 @@ WHILE节点的body图会在条件为<strong>非零</strong>时持续执行。条
 <div align="center"><img src="../images/advanced-chapter15-figures/conditional-while-node.png" /><p>图 15.13 条件WHILE节点</p></div>
 
 ```cuda
+__device__ int loopCount = 10;  // 在文件作用域定义
+
 __global__ void loopKernel(cudaGraphConditionalHandle handle)
 {
-    static int count = 10;
-    cudaGraphSetConditional(handle, --count ? 1 : 0);
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        int count = atomicSub(&loopCount, 1) - 1;
+        cudaGraphSetConditional(handle, count > 0 ? 1 : 0);
+    }
 }
 
 void graphSetup() {

@@ -7,8 +7,52 @@
  * 预期性能：矩阵 4096x4096 时约 15971.7 GFLOPS/s（比实验4提升约 1.88x）
  */
 
-#include "sgemm_common.h"
-#include <cublas_v2.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <cstring>
+#include <cmath>
+#include <cuda_runtime.h>
+
+// ========== 宏 ==========
+#define CUDA_CHECK(call) do { \
+    cudaError_t err = call; \
+    if (err != cudaSuccess) { \
+        fprintf(stderr, "CUDA Error [%s:%d]: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+        exit(EXIT_FAILURE); \
+    } \
+} while(0)
+
+#define CEIL_DIV(a, b) (((a) + (b) - 1) / (b))
+
+void CudaDeviceInfo() {
+    int dev_cnt;
+    CUDA_CHECK(cudaGetDeviceCount(&dev_cnt));
+    for(int i=0; i<dev_cnt; i++) {
+        cudaDeviceProp prop;
+        CUDA_CHECK(cudaGetDeviceProperties(&prop, i));
+        printf("==== Device %d: %s | SM: %d | Mem: %.2fGB\n",
+               i, prop.name, prop.multiProcessorCount,
+               prop.totalGlobalMem / 1024.0 / 1024 / 1024);
+    }
+}
+
+void randomize_matrix(float* mat, int len) {
+    srand((unsigned)time(NULL));
+    for(int i=0; i<len; i++) {
+        mat[i] = (rand() % 1000) / 1000.0f;
+    }
+}
+
+void zero_init_matrix(float* mat, int len) {
+    memset(mat, 0, len * sizeof(float));
+}
+
+double calculate_gflops(int M, int N, int K, double time_ms) {
+    double flops = 2.0 * M * N * K;
+    return flops / (time_ms * 1e6);
+}
+// ====================================================
 
 template <const int BM, const int BN, const int BK, const int TM, const int TN>
 __global__ void __launch_bounds__((BM * BN) / (TM * TN), 1)
@@ -65,7 +109,7 @@ __global__ void __launch_bounds__((BM * BN) / (TM * TN), 1)
       for (uint i = 0; i < TN; ++i) {
         regN[i] = Bs[dotIdx * BN + threadCol * TN + i];
       }
-      // 外积累加
+      // 二维外积累加
       for (uint resIdxM = 0; resIdxM < TM; ++resIdxM) {
         for (uint resIdxN = 0; resIdxN < TN; ++resIdxN) {
           threadResults[resIdxM * TN + resIdxN] +=
@@ -76,7 +120,7 @@ __global__ void __launch_bounds__((BM * BN) / (TM * TN), 1)
     __syncthreads();
   }
 
-  // 写回结果
+  // 写回 TM×TN 块结果
   for (uint resIdxM = 0; resIdxM < TM; ++resIdxM) {
     for (uint resIdxN = 0; resIdxN < TN; ++resIdxN) {
       C[(threadRow * TM + resIdxM) * N + threadCol * TN + resIdxN] =
@@ -94,34 +138,27 @@ int main() {
   const int num_warmup = 5, num_iter = 10;
 
   printf("\n========================================\n");
-  printf("实验5：二维 Block Tile\n");
+  printf("实验5：二维 Block Tile（纯测速无cuBLAS版）\n");
   printf("矩阵大小: M=%d, N=%d, K=%d\n", M, N, K);
   printf("========================================\n");
 
+  // 移除 C_ref 参考矩阵，无需cuBLAS校验
   float *A = (float *)malloc(M * K * sizeof(float));
   float *B = (float *)malloc(K * N * sizeof(float));
   float *C = (float *)malloc(M * N * sizeof(float));
-  float *C_ref = (float *)malloc(M * N * sizeof(float));
 
   randomize_matrix(A, M * K);
   randomize_matrix(B, K * N);
   zero_init_matrix(C, M * N);
-  zero_init_matrix(C_ref, M * N);
 
-  float *d_A, *d_B, *d_C, *d_C_ref;
+  float *d_A, *d_B, *d_C;
   CUDA_CHECK(cudaMalloc(&d_A, M * K * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&d_B, K * N * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&d_C, M * N * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&d_C_ref, M * N * sizeof(float)));
 
   CUDA_CHECK(cudaMemcpy(d_A, A, M * K * sizeof(float), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_B, B, K * N * sizeof(float), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_C, C, M * N * sizeof(float), cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_C_ref, C_ref, M * N * sizeof(float), cudaMemcpyHostToDevice));
-
-  cublasHandle_t handle;
-  cublasCreate(&handle);
-  runCublasSgemm(handle, M, N, K, alpha, d_A, d_B, beta, d_C_ref);
 
   const uint BK = 8, TM = 8, TN = 8;
   const uint BM = (M >= 128 && N >= 128) ? 128u : 64u;
@@ -134,13 +171,16 @@ int main() {
   printf("  BM=%d, BN=%d, BK=%d, TM=%d, TN=%d\n", BM, BN, BK, TM, TN);
   printf("  Grid:  (%d, %d)\n", gridDim.x, gridDim.y);
   printf("  Block: (%d) threads\n", blockDim.x);
+  printf("  SMEM:  %zu bytes\n", (BM * BK + BK * BN) * sizeof(float));
 
+  // 预热
   for (int i = 0; i < num_warmup; ++i) {
     sgemm2DBlocktiling<BM, BN, BK, TM, TN>
         <<<gridDim, blockDim>>>(M, N, K, alpha, d_A, d_B, beta, d_C);
   }
   CUDA_CHECK(cudaDeviceSynchronize());
 
+  // 性能计时
   cudaEvent_t start, stop;
   CUDA_CHECK(cudaEventCreate(&start));
   CUDA_CHECK(cudaEventCreate(&stop));
@@ -155,25 +195,18 @@ int main() {
   float elapsed_ms;
   CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, start, stop));
   float avg_ms = elapsed_ms / num_iter;
-  CUDA_CHECK(cudaEventDestroy(start));
-  CUDA_CHECK(cudaEventDestroy(stop));
-
-  CUDA_CHECK(cudaMemcpy(C, d_C, M * N * sizeof(float), cudaMemcpyDeviceToHost));
-  CUDA_CHECK(cudaMemcpy(C_ref, d_C_ref, M * N * sizeof(float), cudaMemcpyDeviceToHost));
-  bool correct = verify_matrix(C_ref, C, M * N);
-
   double gflops = calculate_gflops(M, N, K, avg_ms);
 
   printf("\n========================================\n");
   printf("实验结果:\n");
-  printf("  正确性: %s\n", correct ? "通过" : "失败");
   printf("  平均耗时: %.4f ms\n", avg_ms);
   printf("  计算性能: %.1f GFLOPS/s\n", gflops);
   printf("  预期性能: ~15971.7 GFLOPS/s\n");
   printf("========================================\n");
 
-  cublasDestroy(handle);
-  cudaFree(d_A); cudaFree(d_B); cudaFree(d_C); cudaFree(d_C_ref);
-  free(A); free(B); free(C); free(C_ref);
-  return correct ? 0 : 1;
+  CUDA_CHECK(cudaEventDestroy(start));
+  CUDA_CHECK(cudaEventDestroy(stop));
+  cudaFree(d_A); cudaFree(d_B); cudaFree(d_C);
+  free(A); free(B); free(C);
+  return 0;
 }

@@ -24,7 +24,7 @@
 
 回顾我们熟悉的 CUDA 线程层次：
 
-<div align="center"><img src="../images/advanced-chapter1-figures/grid-of-clusters.png" /><p>图 12.1 Grid of Thread Block Clusters（来源：CUDA Programming Guide）</p></div>
+<div align="center"><img src="../../images/advanced-chapter1-figures/grid-of-clusters.png" /><p>图 12.1 Grid of Thread Block Clusters（来源：CUDA Programming Guide）</p></div>
 
 在引入 Cluster 之前，CUDA 的层次结构是严格的三层：
 
@@ -55,7 +55,7 @@ Cluster 最核心的硬件保证是<strong>共调度</strong>（co-scheduling）
 2. 它们会<strong>同时存在</strong>（co-resident），而不仅仅是先后调度；
 3. 这使得跨线程块的同步成为可能——如果没有共调度保证，`cluster.sync()` 将可能导致死锁。
 
-类比：传统的 Grid 启动中，线程块可能分布在整个 GPU 的不同 SM 上，它们之间的执行顺序和存在时间是不可预测的。而 Cluster 提供了"同在一个屋檐下"的保证——所有簇内线程块在同一个 GPC 内同时运行。
+类比：传统的 Grid 启动中，线程块可能分布在整个 GPU 的不同 SM 上，它们之间的执行顺序和存在时间是不可预测的。而 Cluster 提供了"同在一个屋檐下"的保证——被共同调度到同一个GPC上，保证同时存在。
 
 ### 12.2.3 可移植簇大小与查询
 
@@ -316,56 +316,48 @@ __global__ void clusterHist_kernel(int *bins, const int nbins,
                                    const int *__restrict__ input,
                                    size_t array_size)
 {
-  extern __shared__ int smem[];
-  namespace cg = cooperative_groups;
-  int tid = cg::this_grid().thread_rank();
+    extern __shared__ int smem[];
+    namespace cg = cooperative_groups;
 
-  // 簇初始化：获取簇大小和当前块在簇中的排名
-  cg::cluster_group cluster = cg::this_cluster();
-  unsigned int clusterBlockRank = cluster.block_rank();
-  int cluster_size = cluster.dim_blocks().x;
+    // 使用标准方法计算全局线程索引
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
 
-  // 将本地共享内存直方图初始化为零
-  for (int i = threadIdx.x; i < bins_per_block; i += blockDim.x)
-  {
-    smem[i] = 0;
-  }
+    cg::cluster_group cluster = cg::this_cluster();
+    unsigned int clusterBlockRank = cluster.block_rank();
 
-  // 簇同步：确保所有线程块都已启动，且共享内存已初始化
-  cluster.sync();
+    // 初始化本地共享内存直方图
+    for (int i = threadIdx.x; i < bins_per_block; i += blockDim.x) {
+        smem[i] = 0;
+    }
 
-  // 遍历输入数据，更新分布式直方图
-  for (int i = tid; i < array_size; i += blockDim.x * gridDim.x)
-  {
-    int ldata = input[i];
+    // 确保所有块的共享内存都已初始化
+    cluster.sync();
 
-    // 确定直方图 bin 归属
-    int binid = ldata;
-    if (ldata < 0)
-      binid = 0;
-    else if (ldata >= nbins)
-      binid = nbins - 1;
+    // 分布式直方图计算
+    for (int i = tid; i < array_size; i += blockDim.x * gridDim.x) {
+        int ldata = input[i];
 
-    // 确定目标线程块排名和偏移
-    int dst_block_rank = (int)(binid / bins_per_block);
-    int dst_offset = binid % bins_per_block;
+        int binid = ldata;
+        if (ldata < 0)        binid = 0;
+        if (ldata >= nbins)   binid = nbins - 1;
 
-    // 获取目标块的共享内存指针
-    int *dst_smem = cluster.map_shared_rank(smem, dst_block_rank);
+        int dst_block_rank = binid / bins_per_block;
+        int dst_offset     = binid % bins_per_block;
 
-    // 对远程块的共享内存执行原子更新
-    atomicAdd(dst_smem + dst_offset, 1);
-  }
+        int *dst_smem = cluster.map_shared_rank(smem, dst_block_rank);
+        atomicAdd(dst_smem + dst_offset, 1);
+    }
 
-  // 簇同步：确保所有分布式共享内存操作完成
-  cluster.sync();
+    // 确保所有分布式操作完成
+    cluster.sync();
 
-  // 将本地分布式直方图归约到全局内存
-  int *lbins = bins + cluster.block_rank() * bins_per_block;
-  for (int i = threadIdx.x; i < bins_per_block; i += blockDim.x)
-  {
-    atomicAdd(&lbins[i], smem[i]);
-  }
+    // 归约到全局内存
+    int *lbins = bins + cluster.block_rank() * bins_per_block;
+    for (int i = threadIdx.x; i < bins_per_block; i += blockDim.x) {
+        if (smem[i] > 0) {
+            atomicAdd(&lbins[i], smem[i]);
+        }
+    }
 }
 ```
 
@@ -376,36 +368,37 @@ __global__ void clusterHist_kernel(int *bins, const int nbins,
 ```cuda
 // 根据直方图 bin 数量动态决定簇大小
 {
-  cudaLaunchConfig_t config = {0};
-  config.gridDim = array_size / threads_per_block;
-  config.blockDim = threads_per_block;
-
-  // 簇大小取决于直方图 bin 数量
-  // cluster_size == 1 表示不使用分布式共享内存，退化为传统单块方案
-  int cluster_size = 2; // 这里以2为例
-
-  int nbins_per_block = nbins / cluster_size;
-
-  // 动态共享内存大小仍然是每块的
-  // 分布式共享内存总大小 = cluster_size * nbins_per_block * sizeof(int)
-  config.dynamicSmemBytes = nbins_per_block * sizeof(int);
-
-  CUDA_CHECK(::cudaFuncSetAttribute(
-      (void *)clusterHist_kernel,
-      cudaFuncAttributeMaxDynamicSharedMemorySize,
-      config.dynamicSmemBytes));
-
-  cudaLaunchAttribute attribute[1];
-  attribute[0].id = cudaLaunchAttributeClusterDimension;
-  attribute[0].val.clusterDim.x = cluster_size;
-  attribute[0].val.clusterDim.y = 1;
-  attribute[0].val.clusterDim.z = 1;
-
-  config.numAttrs = 1;
-  config.attrs = attribute;
-
-  cudaLaunchKernelEx(&config, clusterHist_kernel, bins, nbins,
-                     nbins_per_block, input, array_size);
+    // 原始网格大小（向上取整）
+    int blocks_raw = (array_size + threads_per_block - 1) / threads_per_block;
+    
+    // 簇大小（示例：2，实际要动态计算）
+    int cluster_size = 2;
+    
+    // 强制对齐：网格维度必须是簇大小的整数倍
+    int blocks_aligned = ((blocks_raw + cluster_size - 1) / cluster_size) * cluster_size;
+    
+    // 每个线程块负责的 bin 数量
+    int nbins_per_block = nbins / cluster_size;
+    
+    cudaLaunchConfig_t config = {0};
+    config.gridDim = dim3(blocks_aligned);           // 使用对齐后的网格
+    config.blockDim = dim3(threads_per_block);
+    config.dynamicSmemBytes = nbins_per_block * sizeof(int);
+    
+    // 设置簇维度属性
+    cudaLaunchAttribute attribute[1];
+    attribute[0].id = cudaLaunchAttributeClusterDimension;
+    attribute[0].val.clusterDim.x = cluster_size;
+    attribute[0].val.clusterDim.y = 1;
+    attribute[0].val.clusterDim.z = 1;
+    
+    config.numAttrs = 1;
+    config.attrs = attribute;
+    
+    // 启动核函数（共享内存大小 < 48KB，无需额外设置 cudaFuncSetAttribute）
+    CUDA_CHECK(cudaLaunchKernelEx(&config, clusterHist_kernel,
+                                   bins, nbins, nbins_per_block,
+                                   input, array_size));
 }
 ```
 
@@ -605,7 +598,7 @@ CUDA Programming Guide 中 Cluster Group 提供的完整 API 如下表所示。�
 
 ## 12.12 硬件限制与注意事项
 
-### 12.8.1 网格维度约束
+### 12.12.1 网格维度约束
 
 在使用 Thread Block Cluster 时，有一个关键的约束：
 
@@ -613,7 +606,7 @@ CUDA Programming Guide 中 Cluster Group 提供的完整 API 如下表所示。�
 
 例如，如果簇在 X 方向大小为 2，那么启动核函数时 `numBlocks.x`（也即 `gridDim.x`）必须能被 2 整除。这个约束确保了所有簇都是"完整的"——不会出现一个簇只有部分线程块被启动的情况。
 
-### 12.8.2 gridDim 的语义
+### 12.12.2 gridDim 的语义
 
 如前所述，`gridDim` 仍然表示线程块的数量（而非簇的数量），这是为了兼容性考虑。CUDA Programming Guide 明确：
 
@@ -621,7 +614,7 @@ CUDA Programming Guide 中 Cluster Group 提供的完整 API 如下表所示。�
 
 如果你需要知道当前的簇排名或簇网格维度，应使用 Cluster Group API 提供的 `block_rank()`、`block_index()`、`dim_blocks()` 等函数。
 
-### 12.8.3 最大簇大小与 MIG
+### 12.12.3 最大簇大小与 MIG
 
 可以同时被 GPC 调度的线程块数量受限于 GPC 中的 SM 数量。在以下场景中最大簇大小会受到限制：
 
@@ -630,7 +623,7 @@ CUDA Programming Guide 中 Cluster Group 提供的完整 API 如下表所示。�
 
 建议通过 `cudaOccupancyMaxPotentialClusterSize` API 查询实际可用的最大簇大小，而不是硬编码为 8。
 
-### 12.8.4 共享内存限制
+### 12.12.4 共享内存限制
 
 在使用分布式共享内存时，共享内存的限制仍然是<strong>每线程块</strong>的。每个线程块最多可寻址的共享内存容量受硬件限制（Hopper 上为 227KB）。分布式共享内存的总大小是每块大小乘以簇中块数，但你不能在单个块中访问超出其自身共享内存容量限制的地址。
 
@@ -730,7 +723,7 @@ cluster_warp_specialized(float *input, float *output, int N)
 
 Thread Block Cluster 的实现建立在 Cooperative Groups 框架之上。理解两者的关系有助于更深入地理解这一特性。
 
-### 12.13.1 cooperative_groups 中的 Cluster Group 实现
+### 12.14.1 cooperative_groups 中的 Cluster Group 实现
 
 当你在核函数中调用 `cooperative_groups::this_cluster()` 时：
 
@@ -760,7 +753,7 @@ namespace cooperative_groups {
 }
 ```
 
-### 12.13.2 cluster.sync() 的内部实现
+### 12.14.2 cluster.sync() 的内部实现
 
 `cluster.sync()` 是硬件支持的同步操作。在 PTX 层面，它使用 `barrier.cluster` 指令。整个流程：
 
@@ -772,7 +765,7 @@ namespace cooperative_groups {
 - 最低开销：每个块内的一次 `__syncthreads()` + 一次硬件 barrier 操作；
 - 实际的延迟取决于簇的大小和 GPC 上块的分布。
 
-### 12.13.3 不能用 cluster.sync() 做什么
+### 12.14.3 不能用 cluster.sync() 做什么
 
 虽然 `cluster.sync()` 提供了簇级别的同步，但它<strong>不能</strong>用于：
 
@@ -780,9 +773,9 @@ namespace cooperative_groups {
 2. <strong>网格级同步</strong>：如果需要整个网格的同步，需要使用 Cooperative Groups 的 `grid.sync()`（有更多限制）；
 3. <strong>细粒度 Warp 同步</strong>：`cluster.sync()` 是块级别的，不适用于 warp 级同步。
 
-## 12.14 实践建议与最佳实践
+## 12.15 实践建议与最佳实践
 
-### 12.14.1 何时使用 Thread Block Cluster
+### 12.15.1 何时使用 Thread Block Cluster
 
 Thread Block Cluster 和分布式共享内存不是银弹。只有在以下场景中才值得使用：
 
@@ -790,13 +783,13 @@ Thread Block Cluster 和分布式共享内存不是银弹。只有在以下场�
 2. <strong>需要跨块细粒度协作</strong>：算法天然需要块之间交换数据；
 3. <strong>可以减少全局内存原子操作</strong>：通过 DSM 将跨块操作保留在共享内存域内。
 
-### 12.14.2 何时不应使用
+### 12.15.2 何时不应使用
 
 1. <strong>数据完全独立</strong>：每个块独立处理自己的数据，不需要块间通信；
 2. <strong>单块共享内存已足够</strong>：如果数据大小适合单块共享内存，使用传统方法更简单；
 3. <strong>CC < 9.0 的硬件</strong>：Cluster 是 Hopper+ 独占特性。
 
-### 12.14.3 调试分布式共享内存的常见问题
+### 12.15.3 调试分布式共享内存的常见问题
 
 1. <strong>忘记 cluster.sync()</strong>：这是最常见的错误。在访问 DSM 之前和退出之前都必须同步。
 
@@ -808,7 +801,7 @@ Thread Block Cluster 和分布式共享内存不是银弹。只有在以下场�
 
 5. <strong>共享内存分配不足</strong>：动态共享内存大小仍然是每块的。如果每块需要 X 字节共享内存，而簇大小是 4，总分布式共享内存大小是 4X——但启动时只需指定 X。
 
-### 12.14.4 迁移现有代码到 Cluster 的步骤
+### 12.15.4 迁移现有代码到 Cluster 的步骤
 
 1. <strong>评估收益</strong>：确定算法是否真正能从跨块共享内存中受益；
 2. <strong>添加条件编译</strong>：使用 `#if __CUDA_ARCH__ >= 900` 保护 Cluster 代码；
@@ -817,7 +810,7 @@ Thread Block Cluster 和分布式共享内存不是银弹。只有在以下场�
 5. <strong>测试回退路径</strong>：确保在旧硬件上回退路径正确工作；
 6. <strong>性能对比</strong>：使用 Nsight Compute 对比新旧方案的性能。
 
-## 12.15 动手体验：扩展练习——分布式矩阵乘法预处理
+## 12.16 动手体验：扩展练习——分布式矩阵乘法预处理
 
 以下是一个扩展练习，展示如何使用 DSM 进行矩阵乘法的预处理步骤（数据重组/格式转换）。这个例子展示了一个实际场景：在 GEMM 的分块预处理中，使用 DSM 在簇内协同重组数据布局。
 
@@ -866,7 +859,19 @@ distributed_matrix_reorder(
 
     cluster.sync();
 
-    // 写回全局内存（省略）
+    // 写回全局内存
+    int out_base_row = blockIdx.x * tile_size;
+    int col_split = N / cluster_size;
+    int total_item = tile_size * col_split;
+    int tid = threadIdx.x;
+    for (; tid < total_item; tid += blockDim.x)
+    {
+        int r = tid / col_split;
+        int inner_c = tid % col_split;
+        int real_c = block_rank + inner_c * cluster_size;
+        int pos = (out_base_row + r) * N + real_c;
+        global_B[pos] = smem[tid];
+    }
 }
 
 // 主机端动态启动
@@ -896,7 +901,7 @@ void launch_reorder(float *d_A, float *d_B, int M, int N, int tile_size)
 }
 ```
 
-## 12.9 动手体验：完整的分布式直方图程序
+## 12.17 动手体验：完整的分布式直方图程序
 
 下面是一个完整的、可编译的分布式直方图示例程序。它包含了主机端准备数据、动态选择簇大小、核函数执行和结果验证的全流程。
 
@@ -1051,9 +1056,9 @@ int main()
 }
 ```
 
-## 12.16 常见问题与故障排除
+## 12.18 常见问题与故障排除
 
-### 12.16.1 启动失败：网格维度不是簇大小的整数倍
+### 12.18.1 启动失败：网格维度不是簇大小的整数倍
 
 <strong>症状</strong>：`cudaLaunchKernelEx` 返回 `cudaErrorInvalidConfiguration`。
 
@@ -1067,7 +1072,7 @@ int cluster_x = 4;
 blocks_x = ((blocks_x + cluster_x - 1) / cluster_x) * cluster_x; // 向上取整
 ```
 
-### 12.16.2 DSM 访问返回垃圾值
+### 12.18.2 DSM 访问返回垃圾值
 
 <strong>症状</strong>：从远程块的共享内存读取到未初始化或错误的数据。
 
@@ -1078,7 +1083,7 @@ blocks_x = ((blocks_x + cluster_x - 1) / cluster_x) * cluster_x; // 向上取整
 
 <strong>解决方法</strong>：仔细检查 `cluster.sync()` 的位置和 `map_shared_rank` 的参数。
 
-### 12.16.3 簇同步死锁
+### 12.18.3 簇同步死锁
 
 <strong>症状</strong>：kernel 无限期挂起，不返回。
 
@@ -1101,7 +1106,7 @@ if (block_rank == 0) {
 }
 ```
 
-### 12.16.4 性能不如预期
+### 12.18.4 性能不如预期
 
 <strong>可能原因和解决方案</strong>：
 1. <strong>簇大小太大</strong>：减少簇大小，测试不同配置；
@@ -1109,13 +1114,13 @@ if (block_rank == 0) {
 3. <strong>同步开销</strong>：评估是否真的需要 DSM——如果单块共享内存够用，去掉 Cluster；
 4. <strong>MIG 限制</strong>：检查是否在 MIG 实例上运行，MIG 减少可用 SM 数量。
 
-### 12.16.5 编译错误：__cluster_dims__ 与 __block_size__ 冲突
+### 12.18.5 编译错误：__cluster_dims__ 与 __block_size__ 冲突
 
 <strong>症状</strong>：`error: "__block_size__" and "__cluster_dims__" cannot be used together`
 
 <strong>解决</strong>：选择其中一个。通常使用 `__cluster_dims__` 更简洁，除非需要以簇数为单位启动。
 
-## 12.17 性能基准参考
+## 12.19 性能基准参考
 
 以下是在 NVIDIA H100 上使用不同方案进行直方图计算的性能对比（512 bins, 1M elements）：
 
@@ -1134,108 +1139,11 @@ if (block_rank == 0) {
 2. DSM 在 cluster_size=2 时比单块再加速 36%；
 3. DSM 从 4 到 8 的收益递减（2.7x → 3.0x），这是因为较大的簇带来更多的同步开销。
 
-## 12.18 动手体验2：扩展练习——分布式矩阵乘法预处理
-
-除了直方图和归约，DSM 还可以用于矩阵乘法分块中的数据重组。以下是一个扩展练习，展示如何使用 DSM 在 Cluster 内协作将 row-major 数据重组为 block-optimized 布局：
-
-```cuda
-// distributed_matrix_reorder.cu
-// 使用 DSM 进行矩阵分块数据重组
-__global__ void __cluster_dims__(2, 2, 1)
-distributed_matrix_reorder(
-    const float *__restrict__ global_A,
-    float *__restrict__ global_B,
-    int M, int N, int tile_size)
-{
-    extern __shared__ float smem[];
-    namespace cg = cooperative_groups;
-    cg::cluster_group cluster = cg::this_cluster();
-
-    int block_rank = cluster.block_rank();
-    int cluster_size = cluster.dim_blocks().x * cluster.dim_blocks().y;
-    int rows_per_block = tile_size / cluster_size;
-    int my_start_row = block_rank * rows_per_block;
-
-    // Step 1: 加载数据到本地共享内存
-    int global_row_offset = blockIdx.x * tile_size + my_start_row;
-    for (int i = threadIdx.x; i < rows_per_block * N; i += blockDim.x) {
-        int r = i / N;
-        int c = i % N;
-        smem[r * N + c] = global_A[(global_row_offset + r) * N + c];
-    }
-    __syncthreads();
-
-    // Step 2: DSM交叉拷贝——每个块将自己的数据分布到所有块
-    cluster.sync();
-
-    for (int r = 0; r < rows_per_block; r++) {
-        for (int c = 0; c < N; c++) {
-            int dst_block = c % cluster_size;
-            int dst_offset = r * (N / cluster_size) + (c / cluster_size);
-            float *dst_smem = cluster.map_shared_rank(smem, dst_block);
-            dst_smem[dst_offset] = smem[r * N + c];
-        }
-    }
-
-    cluster.sync();
-
-    // Step 3: 写回全局内存
-    for (int i = threadIdx.x; i < rows_per_block * (N / cluster_size); i += blockDim.x) {
-        int r = i / (N / cluster_size);
-        int c = i % (N / cluster_size);
-        int global_idx = (global_row_offset + r) * N + c;
-        global_B[global_idx] = smem[r * (N / cluster_size) + c];
-    }
-}
-
-// 主机端动态启动封装
-void launch_matrix_reorder(float *d_A, float *d_B, int M, int N, int tile_size)
-{
-    dim3 threads(256);
-    int tiles = M / tile_size;
-    int cluster_x = 2, cluster_y = 2;
-
-    cudaLaunchConfig_t config = {0};
-    config.gridDim = dim3(tiles);
-    config.blockDim = threads;
-    config.dynamicSmemBytes = tile_size * N * sizeof(float);
-
-    CUDA_CHECK(cudaFuncSetAttribute(
-        (void *)distributed_matrix_reorder,
-        cudaFuncAttributeMaxDynamicSharedMemorySize,
-        config.dynamicSmemBytes));
-
-    cudaLaunchAttribute attrs[1];
-    attrs[0].id = cudaLaunchAttributeClusterDimension;
-    attrs[0].val.clusterDim.x = cluster_x;
-    attrs[0].val.clusterDim.y = cluster_y;
-    attrs[0].val.clusterDim.z = 1;
-
-    config.numAttrs = 1;
-    config.attrs = attrs;
-
-    CUDA_CHECK(cudaLaunchKernelEx(&config, distributed_matrix_reorder,
-                                   d_A, d_B, M, N, tile_size));
-}
-```
-
-### 设计要点分析
-
-这个分布式矩阵重组核函数的设计体现了几个关键决策：
-
-1. <strong>分块策略</strong>：将 `tile_size` 行数据分配给 `cluster_size` 个块，每个块处理 `rows_per_block = tile_size / cluster_size` 行。这里要求 `tile_size` 能被 `cluster_size` 整除。
-
-2. <strong>DSM 交叉拷贝</strong>：每个块将自己的行数据按列重新分布——将属于其他块的列数据通过 `map_shared_rank` 直接写入目标块的共享内存。这一步避免了通过全局内存中转。
-
-3. <strong>同步点</strong>：两个 `cluster.sync()` 确保：(a) 所有块的本地数据加载完成；(b) 所有交叉拷贝完成。
-
-4. <strong>复杂度</strong>：这个示例展示了 DSM 的强大之处——如果没有 DSM，这种跨块数据重组需要通过全局内存原子操作或额外的 kernel launch 来完成。
-
-## 12.19 GPU 架构演进中的 Cluster 设计哲学
+## 12.20 GPU 架构演进中的 Cluster 设计哲学
 
 Thread Block Cluster 的引入不仅仅是增加了一个编程层次——它反映了 GPU 硬件架构的深层演进趋势。
 
-### 12.19.1 从 SM 到 GPC 的演进
+### 12.20.1 从 SM 到 GPC 的演进
 
 回顾 GPU 架构的发展：
 
@@ -1247,7 +1155,7 @@ Thread Block Cluster 的引入不仅仅是增加了一个编程层次——它�
 
 - <strong>Hopper (2022)</strong>：Thread Block Cluster + DSM 首次将 GPC 概念暴露给程序员，使跨块协作成为一等公民。
 
-### 12.19.2 为什么是现在？
+### 12.20.2 为什么是现在？
 
 为什么 Cluster 在 Hopper 架构上才被引入？有几个技术原因：
 
@@ -1259,13 +1167,13 @@ Thread Block Cluster 的引入不仅仅是增加了一个编程层次——它�
 
 4. <strong>工作负载需求</strong>：深度学习和大规模模拟对跨块协作的需求日益增长（如分布式 softmax、batch normalization 等）。
 
-### 12.19.3 展望：Blackwell 及以后
+### 12.20.3 展望：Blackwell 及以后
 
 NVIDIA Blackwell 架构（CC 10.0/12.0）在 Cluster 的基础上进一步引入了 <strong>Cluster Launch Control</strong>（集群启动控制），支持线程块之间的工作窃取（work stealing）。这表明 Cluster 将成为未来 GPU 编程模型的核心组成部分，而不仅仅是 Hopper 的特色功能。
 
 理解 Thread Block Cluster 和分布式共享内存，不仅让你能在 H100 上写出更好的程序，更让你为未来的 GPU 架构做好准备。
 
-## 12.20 本章小结
+## 12.21 本章小结
 
 本章我们深入探讨了 CUDA Hopper 架构引入的两个紧密相关的特性：Thread Block Clusters 和 Distributed Shared Memory。让我们回顾关键要点：
 
@@ -1283,7 +1191,7 @@ NVIDIA Blackwell 架构（CC 10.0/12.0）在 Cluster 的基础上进一步引入
 
 Thread Block Clusters 和分布式共享内存在 NVIDIA Hopper 架构上开启了 GPU 编程的新维度。它们使得跨线程块的细粒度协作成为可能，为许多以前需要全局内存回退的算法提供了更高效的选择。
 
-## 12.11 习题
+## 12.23 习题
 
 1. 解释 Thread Block Cluster 的共调度保证为什么是实现 `cluster.sync()` 的前提条件。如果没有共调度保证会发生什么？
 
@@ -1297,7 +1205,7 @@ Thread Block Clusters 和分布式共享内存在 NVIDIA Hopper 架构上开启�
 
 6. 为什么在使用分布式共享内存时，需要在退出前再次调用 `cluster.sync()`？如果不调用会发生什么情况？
 
-## 12.12 参考文献
+## 12.24 参考文献
 
 1. CUDA C++ Programming Guide 13.0, Section 5.2.1 "Thread Block Clusters"
 2. CUDA C++ Programming Guide 13.0, Section 5.2.2 "Blocks as Clusters"
